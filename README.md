@@ -1,4 +1,4 @@
-# strand
+# fluxel
 
 Client-driven data versioning for S3 — think “Git for data, but actually good”.
 
@@ -13,19 +13,19 @@ So yes: Python + polars + delta-rs is a pragmatic way to get started, and you ca
 
 ## Current status (MVP)
 This repo currently implements a minimal metadata-only repository format:
-- `strand init <root>` creates a `.strand/` directory under `<root>` (local or `s3://...`)
-- `strand commit -m "msg" <root>` writes an immutable commit object under `.strand/objects/`
-- `strand log <root>` prints history
-- `strand branch <root> <name>` and `strand checkout <root> <name>` manage refs
+- `fluxel init <root>` creates a `.fluxel/` directory under `<root>` (local or `s3://...`)
+- `fluxel commit -m "msg" <root>` writes an immutable commit object under `.fluxel/objects/`
+- `fluxel log <root>` prints history
+- `fluxel branch <root> <name>` and `fluxel checkout <root> <name>` manage refs
 
 This is the foundation for real data snapshots (manifests) and later diff/merge.
 
 ## Repo format (draft)
-All metadata lives under `<root>/.strand/`:
-- `.strand/config.json` repo config
-- `.strand/objects/<sha256>.json` content-addressed objects
-- `.strand/refs/heads/<branch>` branch refs
-- `.strand/HEAD` current ref
+All metadata lives under `<root>/.fluxel/`:
+- `.fluxel/config.json` repo config
+- `.fluxel/objects/<sha256>.json` content-addressed objects
+- `.fluxel/refs/heads/<branch>` branch refs
+- `.fluxel/HEAD` current ref
 
 ## Install (dev)
 
@@ -39,12 +39,12 @@ Optionally (lockfile-driven):
 - `uv sync --extra dev`
 
 ## CLI usage
-- `strand init /tmp/mydata`
-- `strand commit /tmp/mydata -m "initial"`
-- `strand log /tmp/mydata`
+- `fluxel init /tmp/mydata`
+- `fluxel commit /tmp/mydata -m "initial"`
+- `fluxel log /tmp/mydata`
 
 For S3:
-- `strand init s3://my-bucket/my-prefix`
+- `fluxel init s3://my-bucket/my-prefix`
 
 ## Next milestones
 - Snapshot manifests for Parquet/Delta/Iceberg roots
