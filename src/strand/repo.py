@@ -45,6 +45,7 @@ class Repo:
         # layout
         storage.mkdirs(storage.join(".strand", "objects"))
         storage.mkdirs(storage.join(".strand", "refs", "heads"))
+        storage.mkdirs(storage.join(".strand", "datasets"))
         storage.write_text(storage.join(".strand", "HEAD"), "refs/heads/main\n")
         # create main ref (empty)
         storage.write_text(storage.join(".strand", "refs", "heads", "main"), "")
@@ -171,6 +172,11 @@ class Repo:
         names = df["name"].to_list()
         paths = df["s3_path"].to_list()
         return {n: p for n, p in zip(names, paths)}
+
+    def _load_manifest_part_names(self, part_obj_id: str) -> list[str]:
+        data = self.read_object_bytes(part_obj_id, ext=".parquet")
+        df = pl.read_parquet(io.BytesIO(data), columns=["name"])  # type: ignore[arg-type]
+        return [str(n) for n in df["name"].to_list()]
 
     def snapshot(
         self,
@@ -358,3 +364,64 @@ class Repo:
         self.storage.write_text(
             self.storage.join(".strand", "HEAD"), f"refs/heads/{name}\n"
         )
+
+    def _dataset_ref_path(self, dataset: str, ref: str) -> str:
+        if not dataset or "/" in dataset or ".." in dataset:
+            raise ValueError("Invalid dataset name")
+        if not ref or "/" in ref or ".." in ref:
+            raise ValueError("Invalid ref name")
+        return self.storage.join(".strand", "datasets", dataset, "refs", ref)
+
+    def _ensure_dataset_ref(self, dataset: str, ref: str) -> None:
+        path = self._dataset_ref_path(dataset, ref)
+        parent = path.rsplit("/", 1)[0]
+        self.storage.mkdirs(parent)
+        if not self.storage.exists(path):
+            self.storage.write_text(path, "")
+
+    def dataset_head(self, dataset: str, ref: str = "main") -> Optional[str]:
+        self._ensure_dataset_ref(dataset, ref)
+        value = self.storage.read_text(self._dataset_ref_path(dataset, ref)).strip()
+        return value or None
+
+    def set_dataset_ref(self, dataset: str, snapshot_id: str, ref: str = "main") -> None:
+        self._ensure_dataset_ref(dataset, ref)
+        self.storage.atomic_write_text(
+            self._dataset_ref_path(dataset, ref), f"{snapshot_id}\n"
+        )
+
+    def snapshot_dataset(
+        self,
+        dataset: str,
+        dataset_root: str,
+        ref: str = "main",
+        message: Optional[str] = None,
+        author: Optional[str] = None,
+    ) -> str:
+        snapshot_id = self.snapshot(dataset_root=dataset_root, message=message, author=author)
+        self.set_dataset_ref(dataset=dataset, ref=ref, snapshot_id=snapshot_id)
+        return snapshot_id
+
+    def clone_dataset_ref(self, dataset: str, source_ref: str, target_ref: str) -> None:
+        source_snapshot = self.dataset_head(dataset=dataset, ref=source_ref)
+        if not source_snapshot:
+            raise ValueError(f"Ref has no snapshots: {dataset}@{source_ref}")
+        self.set_dataset_ref(dataset=dataset, ref=target_ref, snapshot_id=source_snapshot)
+
+    def list_dataset_files(self, dataset: str, ref: str = "main") -> list[str]:
+        snapshot_id = self.dataset_head(dataset=dataset, ref=ref)
+        if not snapshot_id:
+            return []
+
+        commit = self.get_commit(snapshot_id)
+        if commit.tree.get("kind") != "snapshot":
+            raise ValueError("Dataset ref does not point to a snapshot commit")
+        manifest_id = commit.tree.get("manifest")
+        if not manifest_id:
+            raise ValueError("Missing manifest id")
+
+        root = SnapshotManifestRoot.model_validate(self.read_object_json(manifest_id))
+        files: list[str] = []
+        for part in root.parts:
+            files.extend(self._load_manifest_part_names(part.object_id))
+        return sorted(files)
