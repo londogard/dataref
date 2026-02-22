@@ -367,9 +367,9 @@ class Repo:
 
     def _dataset_ref_path(self, dataset: str, ref: str) -> str:
         if not dataset or "/" in dataset or ".." in dataset:
-            raise ValueError("Invalid dataset name")
+            raise ValueError("Dataset name cannot be empty or contain / or ..")
         if not ref or "/" in ref or ".." in ref:
-            raise ValueError("Invalid ref name")
+            raise ValueError("Ref name cannot be empty or contain / or ..")
         return self.storage.join(".strand", "datasets", dataset, "refs", ref)
 
     def _ensure_dataset_ref(self, dataset: str, ref: str) -> None:
@@ -380,8 +380,10 @@ class Repo:
             self.storage.write_text(path, "")
 
     def dataset_head(self, dataset: str, ref: str = "main") -> Optional[str]:
-        self._ensure_dataset_ref(dataset, ref)
-        value = self.storage.read_text(self._dataset_ref_path(dataset, ref)).strip()
+        path = self._dataset_ref_path(dataset, ref)
+        if not self.storage.exists(path):
+            return None
+        value = self.storage.read_text(path).strip()
         return value or None
 
     def set_dataset_ref(self, dataset: str, snapshot_id: str, ref: str = "main") -> None:
@@ -405,7 +407,9 @@ class Repo:
     def clone_dataset_ref(self, dataset: str, source_ref: str, target_ref: str) -> None:
         source_snapshot = self.dataset_head(dataset=dataset, ref=source_ref)
         if not source_snapshot:
-            raise ValueError(f"Ref has no snapshots: {dataset}@{source_ref}")
+            raise ValueError(
+                f"Source ref is empty or does not exist: {dataset}@{source_ref}"
+            )
         self.set_dataset_ref(dataset=dataset, ref=target_ref, snapshot_id=source_snapshot)
 
     def list_dataset_files(self, dataset: str, ref: str = "main") -> list[str]:
@@ -415,7 +419,9 @@ class Repo:
 
         commit = self.get_commit(snapshot_id)
         if commit.tree.get("kind") != "snapshot":
-            raise ValueError("Dataset ref does not point to a snapshot commit")
+            raise ValueError(
+                f"Dataset ref does not point to a snapshot commit (found: {commit.tree.get('kind')})"
+            )
         manifest_id = commit.tree.get("manifest")
         if not manifest_id:
             raise ValueError("Missing manifest id")
