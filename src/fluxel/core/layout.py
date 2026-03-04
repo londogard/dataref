@@ -18,6 +18,7 @@ class FluxelLayout:
     blobs_dir: Path
     commits_dir: Path
     manifests_dir: Path
+    staging_dir: Path
     refs_dir: Path
     heads_dir: Path
 
@@ -28,10 +29,18 @@ def initialize_fluxel_layout(root: str | Path) -> FluxelLayout:
     blobs_dir = fluxel_dir / "blobs"
     commits_dir = fluxel_dir / "commits"
     manifests_dir = fluxel_dir / "manifests"
+    staging_dir = fluxel_dir / "staging"
     refs_dir = fluxel_dir / "refs"
     heads_dir = refs_dir / "heads"
 
-    for path in (blobs_dir, commits_dir, manifests_dir, refs_dir, heads_dir):
+    for path in (
+        blobs_dir,
+        commits_dir,
+        manifests_dir,
+        staging_dir,
+        refs_dir,
+        heads_dir,
+    ):
         path.mkdir(parents=True, exist_ok=True)
 
     return FluxelLayout(
@@ -40,6 +49,7 @@ def initialize_fluxel_layout(root: str | Path) -> FluxelLayout:
         blobs_dir=blobs_dir,
         commits_dir=commits_dir,
         manifests_dir=manifests_dir,
+        staging_dir=staging_dir,
         refs_dir=refs_dir,
         heads_dir=heads_dir,
     )

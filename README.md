@@ -20,10 +20,10 @@ Fluxel separates the platform into three layers:
 	- Content-addressed objects keyed by Blake3 digest.
 	- Physical layout is simple and deterministic (`<hash[:2]>/<hash[2:]>`).
 2. **Metadata Layer (`manifests/`, `commits/`, `refs/`)**
-	- JSONL manifests map logical path -> hash + metadata.
+	- JSONL manifests map logical path -> identity + metadata.
 	- Commit objects (JSON) and branch refs provide Git-like lineage semantics.
 3. **Access Layer (`fsspec`)**
-	- `fluxel://<dataset>@<branch_or_commit>/<path>` resolves metadata, then reads blob bytes.
+	- `fluxel://<dataset>@<branch_or_commit>/<path>` resolves metadata, then reads either canonical blob bytes or source URI bytes for metadata-only entries.
 
 ## MVP Status (Current)
 
@@ -32,6 +32,9 @@ Fluxel is intentionally in MVP mode.
 ### Implemented
 
 - Commit snapshots over a dataset root (`fluxel commit`).
+- Branch-scoped staging workflow (`fluxel add`, `fluxel rm`, `fluxel status`, `fluxel commit --staged`).
+- Commit identity modes: `blake3` (default) and `meta` (`hash(path+size)`).
+- Verify command to promote metadata-only entries to canonical blobs (`fluxel verify`).
 - Zero-copy branch pointers (`fluxel branch`).
 - Metadata-only diff between refs (`fluxel diff`).
 - Disposable analytical index from manifest (`fluxel index build/query/drop`, DuckDB + optional Parquet export).
@@ -67,6 +70,14 @@ mkdir -p /tmp/fluxel-demo
 echo "hello" > /tmp/fluxel-demo/a.txt
 
 uv run fluxel commit --root /tmp/fluxel-demo -m "initial"
+uv run fluxel commit --root /tmp/fluxel-demo -m "fast metadata snapshot" --identity meta
+uv run fluxel verify --root /tmp/fluxel-demo --ref main
+
+# branch-scoped staged flow
+uv run fluxel branch --root /tmp/fluxel-demo feature
+uv run fluxel add --root /tmp/fluxel-demo --ref feature data/new.csv
+uv run fluxel status --root /tmp/fluxel-demo --ref feature
+uv run fluxel commit --root /tmp/fluxel-demo --ref feature --staged -m "feature updates"
 
 echo "hello v2" > /tmp/fluxel-demo/a.txt
 uv run fluxel commit --root /tmp/fluxel-demo -m "update"
@@ -93,7 +104,44 @@ from fluxel.core import FluxelFileSystem
 fs = FluxelFileSystem(dataset_roots={"my_data": "/tmp/fluxel-demo"})
 with fs.open("fluxel://my_data@main/a.txt", "rb") as handle:
 	 data = handle.read()
+
+# include branch staged (not-yet-committed) changes
+with fs.open("fluxel://my_data@feature+staged/a.txt", "rb") as handle:
+	 staged_data = handle.read()
 ```
+
+In `--identity meta` snapshots, Fluxel reads from `source_uri` when no canonical `blobs/` object exists.
+
+## Identity Modes
+
+`fluxel commit` supports two identity modes:
+
+- `--identity blake3` (default)
+	- Reads file bytes.
+	- Stores canonical blob in `.fluxel/blobs/`.
+	- Manifest entry includes `identity_mode=blake3`, `identity_value`, and `blob_hash`.
+
+- `--identity meta`
+	- Does not read file bytes.
+	- Computes identity as `blake3("<relative_path>\n<size>")`.
+	- Stores no canonical blob (`blob_hash=null`) and keeps `source_uri` for reads.
+
+This is useful for large bootstrap imports where strong content verification can be deferred.
+
+## Verify Command
+
+`fluxel verify` promotes metadata-only (`--identity meta`) manifest entries into canonical `blake3` blob-backed entries:
+
+```bash
+uv run fluxel verify --root /tmp/fluxel-demo --ref main
+uv run fluxel verify --root /tmp/fluxel-demo --ref main --path images --path logs/2026
+uv run fluxel verify --root /tmp/fluxel-demo --ref main --dry-run
+```
+
+- Verifies all entries by default (or selected path prefixes with `--path`).
+- `--dry-run` reports how many entries would be promoted without changing blobs/commits.
+- Reads bytes from each entry's `source_uri`, computes Blake3, and stores canonical blob content.
+- Writes a new commit only when at least one entry is promoted.
 
 ## Repository Layout
 

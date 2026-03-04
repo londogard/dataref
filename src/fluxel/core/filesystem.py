@@ -10,13 +10,13 @@ from __future__ import annotations
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import BinaryIO, Iterator
 
 import fsspec
 from fsspec.spec import AbstractFileSystem
 
 from .layout import blob_relpath
-from .manifest import ManifestEntry, ManifestReader
+from .manifest import ManifestEntry
 from .repository import FluxelRepository
 
 
@@ -25,6 +25,7 @@ class FluxelURI:
     dataset: str
     ref: str
     logical_path: str
+    include_staging: bool = False
 
 
 class FluxelFileSystem(AbstractFileSystem):
@@ -51,12 +52,20 @@ class FluxelFileSystem(AbstractFileSystem):
         mode: str = "rb",
         block_size: int | None = None,
         **kwargs: object,
-    ) -> io.BytesIO:
+    ) -> BinaryIO:
         if mode != "rb":
-            raise NotImplementedError("FluxelFileSystem currently supports read-only binary mode")
+            raise NotImplementedError(
+                "FluxelFileSystem currently supports read-only binary mode"
+            )
         resolved = self._resolve_entry(path)
-        blob_path = self._blob_path(resolved.root, resolved.entry.hash)
-        return io.BytesIO(blob_path.read_bytes())
+        if resolved.entry.blob_hash:
+            blob_path = self._blob_path(resolved.root, resolved.entry.blob_hash)
+            return io.BytesIO(blob_path.read_bytes())
+        if resolved.entry.source_uri:
+            return fsspec.open(resolved.entry.source_uri, mode="rb").open()
+        raise FileNotFoundError(
+            "Entry has no canonical blob hash and no readable source URI"
+        )
 
     def exists(self, path: str, **kwargs: object) -> bool:
         try:
@@ -72,23 +81,24 @@ class FluxelFileSystem(AbstractFileSystem):
             "type": "file",
             "size": resolved.entry.size,
             "hash": resolved.entry.hash,
+            "identity_mode": resolved.entry.identity_mode,
             "mtime_ns": resolved.entry.mtime_ns,
             "commit": resolved.commit_id,
+            "staged": resolved.uri.include_staging,
             "dataset": resolved.uri.dataset,
         }
 
-    def ls(self, path: str, detail: bool = True, **kwargs: object) -> list[dict[str, object]] | list[str]:
+    def ls(
+        self, path: str, detail: bool = True, **kwargs: object
+    ) -> list[dict[str, object]] | list[str]:
         uri = self._parse_uri(path)
         root = self._dataset_root(uri.dataset)
         repo = FluxelRepository(root)
-        commit_id = repo.resolve_ref(uri.ref)
-        commit_obj = repo.read_commit(commit_id)
-        manifest_path = root / ".fluxel" / "manifests" / f"{commit_obj.manifest}.jsonl"
-        reader = ManifestReader(manifest_path)
+        entries = repo.resolve_entries(uri.ref, include_staging=uri.include_staging)
 
         normalized_prefix = uri.logical_path.strip("/")
         results: list[dict[str, object] | str] = []
-        for entry in reader.iter_entries():
+        for entry in entries.values():
             if normalized_prefix and not (
                 entry.path == normalized_prefix
                 or entry.path.startswith(f"{normalized_prefix}/")
@@ -102,6 +112,7 @@ class FluxelFileSystem(AbstractFileSystem):
                         "type": "file",
                         "size": entry.size,
                         "hash": entry.hash,
+                        "identity_mode": entry.identity_mode,
                     }
                 )
             else:
@@ -113,9 +124,8 @@ class FluxelFileSystem(AbstractFileSystem):
         root = self._dataset_root(uri.dataset)
         repo = FluxelRepository(root)
         commit_id = repo.resolve_ref(uri.ref)
-        commit_obj = repo.read_commit(commit_id)
-        manifest_path = root / ".fluxel" / "manifests" / f"{commit_obj.manifest}.jsonl"
-        entry = ManifestReader(manifest_path).get_entry(uri.logical_path)
+        entries = repo.resolve_entries(uri.ref, include_staging=uri.include_staging)
+        entry = entries.get(uri.logical_path)
         if entry is None:
             raise FileNotFoundError(path)
         return ResolvedEntry(uri=uri, root=root, commit_id=commit_id, entry=entry)
@@ -131,20 +141,32 @@ class FluxelFileSystem(AbstractFileSystem):
     def _parse_uri(self, path: str) -> FluxelURI:
         stripped = self._strip_protocol(path)
         if "@" not in stripped:
-            raise ValueError("Fluxel URI must include a ref: fluxel://<dataset>@<ref>/<path>")
+            raise ValueError(
+                "Fluxel URI must include a ref: fluxel://<dataset>@<ref>/<path>"
+            )
         dataset, remainder = stripped.split("@", maxsplit=1)
         if not dataset:
             raise ValueError("Fluxel URI dataset cannot be empty")
         if "/" in remainder:
-            ref, logical_path = remainder.split("/", maxsplit=1)
+            ref_raw, logical_path = remainder.split("/", maxsplit=1)
         else:
-            ref, logical_path = remainder, ""
+            ref_raw, logical_path = remainder, ""
+        include_staging = False
+        ref = ref_raw
+        if ref_raw.endswith("+staged"):
+            include_staging = True
+            ref = ref_raw[: -len("+staged")]
         if not ref:
             raise ValueError("Fluxel URI ref cannot be empty")
         logical_path = logical_path.strip("/")
         if not logical_path:
             raise ValueError("Fluxel URI must include a logical file path")
-        return FluxelURI(dataset=dataset, ref=ref, logical_path=logical_path)
+        return FluxelURI(
+            dataset=dataset,
+            ref=ref,
+            logical_path=logical_path,
+            include_staging=include_staging,
+        )
 
     def _blob_path(self, dataset_root: Path, content_hash: str) -> Path:
         return dataset_root / ".fluxel" / "blobs" / blob_relpath(content_hash)

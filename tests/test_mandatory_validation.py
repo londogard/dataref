@@ -107,3 +107,18 @@ def test_disposable_analytical_index(tmp_path: Path) -> None:
     commit = repo.read_commit(commit_id)
     manifest_path = tmp_path / ".fluxel" / "manifests" / f"{commit.manifest}.jsonl"
     assert manifest_path.exists()
+
+
+def test_uri_routing_supports_metadata_identity_entries(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "meta_data"
+    dataset_root.mkdir(parents=True)
+    (dataset_root / "test.csv").write_text("value\n42\n")
+
+    repo = FluxelRepository(dataset_root)
+    repo.commit("metadata only", identity_mode="meta")
+
+    assert not any((dataset_root / ".fluxel" / "blobs").rglob("*"))
+
+    fs = FluxelFileSystem(dataset_roots={"meta_data": dataset_root})
+    with fs.open("fluxel://meta_data@main/test.csv", "rb") as handle:
+        assert handle.read() == b"value\n42\n"

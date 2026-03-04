@@ -22,14 +22,33 @@ class ManifestEntry:
     hash: str
     size: int
     mtime_ns: int
+    identity_mode: str = "blake3"
+    identity_value: str | None = None
+    blob_hash: str | None = None
+    source_uri: str | None = None
 
     @staticmethod
     def from_dict(data: dict[str, object]) -> "ManifestEntry":
+        hash_value = str(data.get("hash") or data.get("identity_value") or "")
+        if not hash_value:
+            raise ValueError("Manifest entry must include hash or identity_value")
+        identity_mode = str(data.get("identity_mode") or "blake3")
+        identity_value = data.get("identity_value")
+        blob_hash = data.get("blob_hash")
+        if blob_hash is None and "blob_hash" not in data and identity_mode == "blake3":
+            blob_hash = hash_value
+        source_uri = data.get("source_uri")
         return ManifestEntry(
             path=str(data["path"]),
-            hash=str(data["hash"]),
+            hash=hash_value,
             size=int(data["size"]),
             mtime_ns=int(data["mtime_ns"]),
+            identity_mode=identity_mode,
+            identity_value=(
+                str(identity_value) if identity_value is not None else hash_value
+            ),
+            blob_hash=str(blob_hash) if blob_hash is not None else None,
+            source_uri=str(source_uri) if source_uri is not None else None,
         )
 
 
@@ -93,11 +112,16 @@ def build_manifest_entries(
         file_path = Path(file_path_raw).resolve()
         stat = file_path.stat()
         relative_path = file_path.relative_to(root_path).as_posix()
+        digest = hash_file(file_path)
         yield ManifestEntry(
             path=relative_path,
-            hash=hash_file(file_path),
+            hash=digest,
             size=stat.st_size,
             mtime_ns=stat.st_mtime_ns,
+            identity_mode="blake3",
+            identity_value=digest,
+            blob_hash=digest,
+            source_uri=file_path.as_uri(),
         )
 
 
