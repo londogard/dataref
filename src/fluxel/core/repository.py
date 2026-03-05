@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Iterator
+from typing import Iterator, Literal
 
 from blake3 import blake3
 import fsspec
@@ -147,7 +147,7 @@ class FluxelRepository:
     def commit(
         self,
         message: str,
-        identity_mode: str = "blake3",
+        identity_mode: Literal["blake3", "meta"] = "blake3",
         *,
         staged: bool = False,
         ref: str | None = None,

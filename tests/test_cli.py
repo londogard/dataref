@@ -176,6 +176,14 @@ def test_cli_staging_commit_is_branch_scoped(tmp_path: Path, capsys) -> None:
     assert add_payload["added"] == ["feature.txt"]
 
     fs = FluxelFileSystem(dataset_roots={"demo": tmp_path})
+    staged_root_listing = fs.ls("fluxel://demo@feature+staged/", detail=False)
+    assert "fluxel://demo@feature/shared.txt" in staged_root_listing
+    assert "fluxel://demo@feature/feature.txt" in staged_root_listing
+
+    staged_wildcard_listing = fs.ls("fluxel://demo@feature+staged/*", detail=False)
+    assert "fluxel://demo@feature/shared.txt" in staged_wildcard_listing
+    assert "fluxel://demo@feature/feature.txt" in staged_wildcard_listing
+
     with fs.open("fluxel://demo@feature+staged/feature.txt", "rb") as handle:
         assert handle.read() == b"feature"
 

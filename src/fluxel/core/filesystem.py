@@ -91,12 +91,14 @@ class FluxelFileSystem(AbstractFileSystem):
     def ls(
         self, path: str, detail: bool = True, **kwargs: object
     ) -> list[dict[str, object]] | list[str]:
-        uri = self._parse_uri(path)
+        uri = self._parse_uri(path, allow_empty_path=True)
         root = self._dataset_root(uri.dataset)
         repo = FluxelRepository(root)
         entries = repo.resolve_entries(uri.ref, include_staging=uri.include_staging)
 
         normalized_prefix = uri.logical_path.strip("/")
+        if normalized_prefix == "*":
+            normalized_prefix = ""
         results: list[dict[str, object] | str] = []
         for entry in entries.values():
             if normalized_prefix and not (
@@ -138,7 +140,7 @@ class FluxelFileSystem(AbstractFileSystem):
             return candidate.resolve()
         return Path.cwd().resolve()
 
-    def _parse_uri(self, path: str) -> FluxelURI:
+    def _parse_uri(self, path: str, *, allow_empty_path: bool = False) -> FluxelURI:
         stripped = self._strip_protocol(path)
         if "@" not in stripped:
             raise ValueError(
@@ -159,7 +161,7 @@ class FluxelFileSystem(AbstractFileSystem):
         if not ref:
             raise ValueError("Fluxel URI ref cannot be empty")
         logical_path = logical_path.strip("/")
-        if not logical_path:
+        if not logical_path and not allow_empty_path:
             raise ValueError("Fluxel URI must include a logical file path")
         return FluxelURI(
             dataset=dataset,
