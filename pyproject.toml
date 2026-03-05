@@ -1,37 +1,27 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "strand"
+name = "fluxel"
 version = "0.1.0"
-description = "Client-driven data versioning for S3 (Git-like, no servers)."
+description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "londogard" }]
+authors = [
+    { name = "Hampus Londögård", email = "hampus.londogard@verisure.com" }
+]
+requires-python = ">=3.11"
 dependencies = [
-    "typer>=0.12",
-    "rich>=13.7",
-    "pydantic>=2.6",
-    "fsspec>=2024.2",
-    "s3fs>=2024.2",
-    "polars>=0.20",
+    "blake3>=1.0.8",
+    "boto3>=1.42.57",
+    "duckdb>=1.4.4",
+    "fsspec>=2026.2.0",
 ]
 
-[project.optional-dependencies]
-delta = ["deltalake>=0.21"]
-iceberg = ["pyiceberg>=0.7"]
-dev = ["pytest>=8.0", "ruff>=0.3"]
-
 [project.scripts]
-strand = "strand.cli:app"
+fluxel = "fluxel:main"
 
-[tool.setuptools]
-package-dir = { "" = "src" }
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.ruff]
-line-length = 100
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

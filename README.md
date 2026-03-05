@@ -1,53 +1,168 @@
-# strand
+# Fluxel
 
-Client-driven data versioning for S3 — think “Git for data, but actually good”.
+Fluxel is a serverless (client-first), object-storage-first data versioning engine.
 
-## Why Python first?
-Python is a great starting point for a client-first tool:
-- Fast iteration + great UX for a Git-like CLI.
-- Performance is still strong because key engines are native:
-	- `deltalake` uses delta-rs (Rust) under the hood.
-	- `polars` is Rust-backed and very fast for scans/metadata work.
+The design is deliberately opinionated: keep canonical data storage boring and immutable, and put intelligence in metadata and access layers.
 
-So yes: Python + polars + delta-rs is a pragmatic way to get started, and you can always move hot paths to Rust later.
+## Guardrails (Strict)
 
-## Current status (MVP)
-This repo currently implements a minimal metadata-only repository format:
-- `strand init <root>` creates a `.strand/` directory under `<root>` (local or `s3://...`)
-- `strand commit -m "msg" <root>` writes an immutable commit object under `.strand/objects/`
-- `strand log <root>` prints history
-- `strand branch <root> <name>` and `strand checkout <root> <name>` manage refs
+- Do not optimize canonical blob storage for ML throughput (no tarball/parquet/sharded blob layer).
+- Do not read blob payloads for metadata-only operations (`diff`, `list`, `log`, `status`).
+- Do not introduce a server/daemon/central database.
+- Use Blake3 for all content hashing.
+- Prefer JSONL manifests for stream-safe, O(1)-memory behavior.
 
-This is the foundation for real data snapshots (manifests) and later diff/merge.
+## Core Philosophy
 
-## Repo format (draft)
-All metadata lives under `<root>/.strand/`:
-- `.strand/config.json` repo config
-- `.strand/objects/<sha256>.json` content-addressed objects
-- `.strand/refs/heads/<branch>` branch refs
-- `.strand/HEAD` current ref
+Fluxel separates the platform into three layers:
 
-## Install (dev)
+1. **Canonical Layer (`blobs/`)**
+	- Content-addressed objects keyed by Blake3 digest.
+	- Physical layout is simple and deterministic (`<hash[:2]>/<hash[2:]>`).
+2. **Metadata Layer (`manifests/`, `commits/`, `refs/`)**
+	- JSONL manifests map logical path -> identity + metadata.
+	- Commit objects (JSON) and branch refs provide Git-like lineage semantics.
+3. **Access Layer (`fsspec`)**
+	- `fluxel://<dataset>@<branch_or_commit>/<path>` resolves metadata, then reads either canonical blob bytes or source URI bytes for metadata-only entries.
 
-Using `uv`:
-- `uv venv && source .venv/bin/activate`
-- `uv pip install -e '.[dev]'`
-- `pytest`
+## MVP Status (Current)
 
-Optionally (lockfile-driven):
-- `uv lock`
-- `uv sync --extra dev`
+Fluxel is intentionally in MVP mode.
 
-## CLI usage
-- `strand init /tmp/mydata`
-- `strand commit /tmp/mydata -m "initial"`
-- `strand log /tmp/mydata`
+### Implemented
 
-For S3:
-- `strand init s3://my-bucket/my-prefix`
+- Commit snapshots over a dataset root (`fluxel commit`).
+- Branch-scoped staging workflow (`fluxel add`, `fluxel rm`, `fluxel status`, `fluxel commit --staged`).
+- Commit identity modes: `blake3` (default) and `meta` (`hash(path+size)`).
+- Verify command to promote metadata-only entries to canonical blobs (`fluxel verify`).
+- Zero-copy branch pointers (`fluxel branch`).
+- Metadata-only diff between refs (`fluxel diff`).
+- Disposable analytical index from manifest (`fluxel index build/query/drop`, DuckDB + optional Parquet export).
+- `fsspec` provider for `fluxel://` URI reads.
+- Local + S3 storage backend abstractions available in code.
 
-## Next milestones
-- Snapshot manifests for Parquet/Delta/Iceberg roots
-- `diff` (between commits/branches)
-- `merge` (conflict handling for dataset-level operations)
-- Stronger ACID semantics using S3 conditional writes (ETag / If-Match)
+### Not Fully Wired Yet
+
+- Repository commands still use local-path flow as primary execution path.
+- No remote sync CLI (`push/pull/fetch`) yet.
+- No `log/status/list/checkout` CLI surface yet.
+- No `s5cmd` command-list generation path for bulk transfer yet.
+
+## Technical Stack
+
+- Python 3.11+
+- `blake3` for hashing
+- JSONL manifests + JSON commit objects
+- `fsspec` for URI access abstraction
+- `duckdb` for disposable analytical indexing
+
+## Install
+
+```bash
+uv sync
+uv run fluxel --help
+```
+
+## Quickstart
+
+```bash
+mkdir -p /tmp/fluxel-demo
+echo "hello" > /tmp/fluxel-demo/a.txt
+
+uv run fluxel commit --root /tmp/fluxel-demo -m "initial"
+uv run fluxel commit --root /tmp/fluxel-demo -m "fast metadata snapshot" --identity meta
+uv run fluxel verify --root /tmp/fluxel-demo --ref main
+
+# branch-scoped staged flow
+uv run fluxel branch --root /tmp/fluxel-demo feature
+uv run fluxel add --root /tmp/fluxel-demo --ref feature data/new.csv
+uv run fluxel status --root /tmp/fluxel-demo --ref feature
+uv run fluxel commit --root /tmp/fluxel-demo --ref feature --staged -m "feature updates"
+
+echo "hello v2" > /tmp/fluxel-demo/a.txt
+uv run fluxel commit --root /tmp/fluxel-demo -m "update"
+
+uv run fluxel branch --root /tmp/fluxel-demo experiment
+uv run fluxel diff --root /tmp/fluxel-demo <from_ref> <to_ref>
+```
+
+## Analytical Index (Derived, Disposable)
+
+```bash
+uv run fluxel index build --root /tmp/fluxel-demo --ref main --parquet
+uv run fluxel index query --db /path/to/<commit>.duckdb --sql "SELECT COUNT(*) FROM files"
+uv run fluxel index drop --db /path/to/<commit>.duckdb
+```
+
+If the index is deleted, Fluxel remains fully functional from manifests and commits.
+
+## `fsspec` URI Example
+
+```python
+from fluxel.core import FluxelFileSystem
+
+fs = FluxelFileSystem(dataset_roots={"my_data": "/tmp/fluxel-demo"})
+with fs.open("fluxel://my_data@main/a.txt", "rb") as handle:
+	 data = handle.read()
+
+# include branch staged (not-yet-committed) changes
+with fs.open("fluxel://my_data@feature+staged/a.txt", "rb") as handle:
+	 staged_data = handle.read()
+```
+
+In `--identity meta` snapshots, Fluxel reads from `source_uri` when no canonical `blobs/` object exists.
+
+## Identity Modes
+
+`fluxel commit` supports two identity modes:
+
+- `--identity blake3` (default)
+	- Reads file bytes.
+	- Stores canonical blob in `.fluxel/blobs/`.
+	- Manifest entry includes `identity_mode=blake3`, `identity_value`, and `blob_hash`.
+
+- `--identity meta`
+	- Does not read file bytes.
+	- Computes identity as `blake3("<relative_path>\n<size>")`.
+	- Stores no canonical blob (`blob_hash=null`) and keeps `source_uri` for reads.
+
+This is useful for large bootstrap imports where strong content verification can be deferred.
+
+## Verify Command
+
+`fluxel verify` promotes metadata-only (`--identity meta`) manifest entries into canonical `blake3` blob-backed entries:
+
+```bash
+uv run fluxel verify --root /tmp/fluxel-demo --ref main
+uv run fluxel verify --root /tmp/fluxel-demo --ref main --path images --path logs/2026
+uv run fluxel verify --root /tmp/fluxel-demo --ref main --dry-run
+```
+
+- Verifies all entries by default (or selected path prefixes with `--path`).
+- `--dry-run` reports how many entries would be promoted without changing blobs/commits.
+- Reads bytes from each entry's `source_uri`, computes Blake3, and stores canonical blob content.
+- Writes a new commit only when at least one entry is promoted.
+
+## Repository Layout
+
+Fluxel creates `.fluxel/` under each dataset root:
+
+- `blobs/` - canonical content-addressed object store
+- `manifests/` - JSONL path->hash snapshots
+- `commits/` - commit metadata objects
+- `refs/heads/` - branch pointers
+- `refs/HEAD` - symbolic active branch reference (default `main`)
+
+## Mandatory Validation Coverage
+
+Current tests cover required invariants:
+
+- Metadata-only diff reads no blob payloads.
+- Manifest generation for 100k entries stays under RAM cap.
+- `fluxel://my_data@main/test.csv` resolves and returns expected bytes.
+
+Run test suite:
+
+```bash
+uv run pytest tests
+```
