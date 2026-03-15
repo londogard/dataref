@@ -631,8 +631,8 @@ class FluxelRepository:
         if path.match(pattern):
             return True
         if pattern.startswith("**/"):
-            stripped_pattern = pattern[len("**/") :]
-            return len(path.parts) == 1 and path.match(stripped_pattern)
+            pattern_suffix = pattern[len("**/") :]
+            return len(path.parts) == 1 and path.match(pattern_suffix)
         return False
 
     def _stage_path(self, branch: str) -> Path:
