@@ -15,6 +15,7 @@ from .core import (
     build_analytical_index,
     commit,
     drop_analytical_index,
+    import_s3,
     query_analytical_index,
     rm,
     status,
@@ -27,8 +28,8 @@ IdentityMode = Literal["blake3", "meta"]
 
 @dataclass
 class CommitArgs:
-    identity: IdentityMode = "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
     message: str = field(alias=["-m", "--message"], help="Commit message")
+    identity: IdentityMode = "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
     root: str = "."  # "Dataset root path"
     staged: bool = flag(
         False,
@@ -38,9 +39,18 @@ class CommitArgs:
 
 
 @dataclass
+class ImportArgs:
+    source: str = field(positional=True, help="S3 URI to import, e.g. s3://bucket/prefix")
+    message: str = field(alias=["-m", "--message"], help="Commit message")
+    identity: IdentityMode = "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
+    root: str = "."  # Dataset root path
+    ref: str | None = None  # Branch ref to update (defaults to current branch)
+
+
+@dataclass
 class AddArgs:
-    identity: IdentityMode = "blake3"  # Identity strategy for staged additions
     paths: list[str] = field(positional=True, nargs="+", help="Paths to stage")
+    identity: IdentityMode = "blake3"  # Identity strategy for staged additions
     root: str = field(default=".", help="Dataset root path")
     ref: str | None = field(
         default=None,
@@ -138,6 +148,7 @@ class IndexArgs:
 class FluxelCLI:
     command: (
         CommitArgs
+        | ImportArgs
         | AddArgs
         | RmArgs
         | StatusArgs
@@ -148,6 +159,7 @@ class FluxelCLI:
     ) = subparsers(
         {
             "commit": CommitArgs,
+            "import": ImportArgs,
             "add": AddArgs,
             "rm": RmArgs,
             "status": StatusArgs,
@@ -184,6 +196,17 @@ def run_cli(argv: list[str] | None = None) -> int:
             command.message,
             identity_mode=command.identity,
             staged=command.staged,
+            ref=command.ref,
+        )
+        print(commit_id)
+        return 0
+
+    if isinstance(command, ImportArgs):
+        commit_id = import_s3(
+            Path(command.root),
+            command.source,
+            command.message,
+            identity_mode=command.identity,
             ref=command.ref,
         )
         print(commit_id)

@@ -1,11 +1,70 @@
 from __future__ import annotations
 
+import io
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fluxel.core import FluxelFileSystem
 from fluxel import run_cli
 from fluxel.core import ManifestReader
+
+
+class FakeStreamingBody:
+    def __init__(self, payload: bytes) -> None:
+        self._buffer = io.BytesIO(payload)
+
+    def read(self, size: int = -1) -> bytes:
+        return self._buffer.read(size)
+
+    def close(self) -> None:
+        self._buffer.close()
+
+
+class FakeS3Paginator:
+    def __init__(self, objects: dict[str, dict[str, object]]) -> None:
+        self._objects = objects
+
+    def paginate(self, *, Bucket: str, Prefix: str) -> list[dict[str, object]]:
+        contents = []
+        for key, metadata in sorted(self._objects.items()):
+            if not key.startswith(Prefix):
+                continue
+            contents.append(
+                {
+                    "Key": key,
+                    "Size": len(metadata["Body"]),
+                    "LastModified": metadata["LastModified"],
+                }
+            )
+        return [{"Contents": contents}]
+
+
+class FakeS3Client:
+    def __init__(self, objects: dict[str, dict[str, object]]) -> None:
+        self._objects = objects
+
+    def get_paginator(self, operation_name: str) -> FakeS3Paginator:
+        assert operation_name == "list_objects_v2"
+        return FakeS3Paginator(self._objects)
+
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+        assert Bucket == "demo-bucket"
+        metadata = self._objects[Key]
+        return {"Body": FakeStreamingBody(metadata["Body"])}
+
+
+def install_fake_s3(monkeypatch, objects: dict[str, bytes]) -> None:
+    client = FakeS3Client(
+        {
+            key: {
+                "Body": payload,
+                "LastModified": datetime(2026, 1, 2, tzinfo=timezone.utc),
+            }
+            for key, payload in objects.items()
+        }
+    )
+    monkeypatch.setattr("fluxel.core.storage.boto3.client", lambda service_name: client)
 
 
 def test_cli_commit_branch_and_diff(tmp_path: Path, capsys) -> None:
@@ -222,3 +281,92 @@ def test_cli_staging_commit_is_branch_scoped(tmp_path: Path, capsys) -> None:
             "after_size": 7,
         }
     ]
+
+
+def test_cli_import_s3_writes_manifest_and_blobs(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    install_fake_s3(
+        monkeypatch,
+        {
+            "bootstrap/a.txt": b"alpha",
+            "bootstrap/nested/b.txt": b"beta",
+            "bootstrap/": b"",
+        },
+    )
+
+    assert (
+        run_cli(
+            [
+                "import",
+                "--root",
+                str(tmp_path),
+                "s3://demo-bucket/bootstrap",
+                "-m",
+                "bootstrap",
+            ]
+        )
+        == 0
+    )
+    commit_id = capsys.readouterr().out.strip()
+    assert len(commit_id) == 64
+
+    manifest_paths = sorted((tmp_path / ".fluxel" / "manifests").glob("*.jsonl"))
+    assert len(manifest_paths) == 1
+    entries = list(ManifestReader(manifest_paths[0]).iter_entries())
+    assert [entry.path for entry in entries] == ["a.txt", "nested/b.txt"]
+    assert all(entry.identity_mode == "blake3" for entry in entries)
+    assert all(entry.blob_hash for entry in entries)
+    assert {entry.source_uri for entry in entries} == {
+        "s3://demo-bucket/bootstrap/a.txt",
+        "s3://demo-bucket/bootstrap/nested/b.txt",
+    }
+    for entry in entries:
+        blob_path = tmp_path / ".fluxel" / "blobs" / entry.blob_hash[:2] / entry.blob_hash[2:]
+        assert blob_path.exists()
+
+
+def test_cli_import_s3_metadata_entries_can_be_read_and_verified(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    install_fake_s3(
+        monkeypatch,
+        {
+            "imports/a.txt": b"alpha",
+            "imports/nested/b.txt": b"beta",
+        },
+    )
+
+    assert (
+        run_cli(
+            [
+                "import",
+                "--root",
+                str(tmp_path),
+                "s3://demo-bucket/imports",
+                "-m",
+                "metadata import",
+                "--identity",
+                "meta",
+            ]
+        )
+        == 0
+    )
+    first_commit = capsys.readouterr().out.strip()
+    assert len(first_commit) == 64
+    assert not any((tmp_path / ".fluxel" / "blobs").rglob("*"))
+
+    manifest_path = next((tmp_path / ".fluxel" / "manifests").glob("*.jsonl"))
+    entries = list(ManifestReader(manifest_path).iter_entries())
+    assert [entry.identity_mode for entry in entries] == ["meta", "meta"]
+    assert [entry.blob_hash for entry in entries] == [None, None]
+
+    fs = FluxelFileSystem(dataset_roots={"demo": tmp_path})
+    with fs.open("fluxel://demo@main/nested/b.txt", "rb") as handle:
+        assert handle.read() == b"beta"
+
+    assert run_cli(["verify", "--root", str(tmp_path), "--ref", "main"]) == 0
+    verify_payload = json.loads(capsys.readouterr().out)
+    assert verify_payload["created_commit"] is True
+    assert verify_payload["verified_entries"] == 2
+    assert verify_payload["commit_id"] != first_commit

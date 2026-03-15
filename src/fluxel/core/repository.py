@@ -15,11 +15,11 @@ from tempfile import NamedTemporaryFile
 from typing import Iterator, Literal
 
 from blake3 import blake3
-import fsspec
 
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file
 from .layout import FluxelLayout, blob_relpath, initialize_fluxel_layout
 from .manifest import ManifestEntry, ManifestReader, ManifestWriter, walk_files
+from .storage import iter_s3_objects, open_source_uri, parse_s3_uri
 
 
 HEAD_FILE = "HEAD"
@@ -164,6 +164,40 @@ class FluxelRepository:
 
         temp_manifest = self._write_temp_manifest(
             self._materialize_blobs_and_entries(identity_mode=identity_mode)
+        )
+        manifest_hash = blake3_digest_file(temp_manifest)
+        manifest_target = self.layout.manifests_dir / f"{manifest_hash}.jsonl"
+        manifest_target.parent.mkdir(parents=True, exist_ok=True)
+        if not manifest_target.exists():
+            temp_manifest.replace(manifest_target)
+        else:
+            temp_manifest.unlink(missing_ok=True)
+
+        parent_commit = self._branch_head_commit(branch)
+        return self._write_commit_object(
+            branch=branch,
+            message=message,
+            parent_commit=parent_commit,
+            manifest_hash=manifest_hash,
+        )
+
+    def import_s3(
+        self,
+        source_uri: str,
+        message: str,
+        identity_mode: Literal["blake3", "meta"] = "blake3",
+        *,
+        ref: str | None = None,
+    ) -> str:
+        if not message.strip():
+            raise ValueError("Commit message cannot be empty")
+        if identity_mode not in {"blake3", "meta"}:
+            raise ValueError("identity_mode must be one of: blake3, meta")
+        branch = ref or self.current_branch()
+        self._ensure_branch_exists(branch)
+
+        temp_manifest = self._write_temp_manifest(
+            self._materialize_s3_entries(source_uri=source_uri, identity_mode=identity_mode)
         )
         manifest_hash = blake3_digest_file(temp_manifest)
         manifest_target = self.layout.manifests_dir / f"{manifest_hash}.jsonl"
@@ -457,6 +491,41 @@ class FluxelRepository:
                 source_uri=source_uri,
             )
 
+    def _materialize_s3_entries(
+        self,
+        *,
+        source_uri: str,
+        identity_mode: str,
+    ) -> Iterator[ManifestEntry]:
+        _, prefix = parse_s3_uri(source_uri)
+        normalized_prefix = prefix.strip("/")
+        for obj in iter_s3_objects(source_uri):
+            relative_path = self._normalize_s3_import_path(
+                key=obj.key,
+                prefix=normalized_prefix,
+                size=obj.size,
+            )
+            if relative_path is None:
+                continue
+            if identity_mode == "blake3":
+                identity_value = self._store_blob_from_source_uri(obj.source_uri)
+                blob_hash = identity_value
+            elif identity_mode == "meta":
+                identity_value = self._metadata_identity(relative_path, obj.size)
+                blob_hash = None
+            else:
+                raise ValueError("identity_mode must be one of: blake3, meta")
+            yield ManifestEntry(
+                path=relative_path,
+                hash=identity_value,
+                size=obj.size,
+                mtime_ns=obj.mtime_ns,
+                identity_mode=identity_mode,
+                identity_value=identity_value,
+                blob_hash=blob_hash,
+                source_uri=obj.source_uri,
+            )
+
     def _entry_from_working_path(
         self,
         relative_path: str,
@@ -495,6 +564,30 @@ class FluxelRepository:
     def _metadata_identity(self, relative_path: str, size: int) -> str:
         payload = f"{relative_path}\n{size}".encode("utf-8")
         return blake3(payload).hexdigest()
+
+    def _normalize_s3_import_path(
+        self,
+        *,
+        key: str,
+        prefix: str,
+        size: int,
+    ) -> str | None:
+        if key.endswith("/") and size == 0:
+            return None
+        normalized_key = key.strip("/")
+        if not normalized_key:
+            return None
+        normalized_prefix = prefix.strip("/")
+        if normalized_prefix:
+            if normalized_key == normalized_prefix:
+                relative_path = normalized_key.rsplit("/", maxsplit=1)[-1]
+            elif normalized_key.startswith(f"{normalized_prefix}/"):
+                relative_path = normalized_key[len(normalized_prefix) + 1 :]
+            else:
+                raise ValueError(f"S3 key '{key}' is outside import prefix '{prefix}'")
+        else:
+            relative_path = normalized_key
+        return self._normalize_stage_path(relative_path)
 
     def _stage_path(self, branch: str) -> Path:
         return self.layout.staging_dir / f"{branch}.json"
@@ -643,7 +736,7 @@ class FluxelRepository:
         with NamedTemporaryFile(mode="wb", delete=False) as temp:
             temp_path = Path(temp.name)
             hasher = blake3()
-            with fsspec.open(source_uri, mode="rb").open() as source:
+            with open_source_uri(source_uri) as source:
                 while True:
                     chunk = source.read(DEFAULT_CHUNK_SIZE)
                     if not chunk:
@@ -681,6 +774,22 @@ def commit(
         message,
         identity_mode=identity_mode,
         staged=staged,
+        ref=ref,
+    )
+
+
+def import_s3(
+    root: str | Path,
+    source_uri: str,
+    message: str,
+    identity_mode: str = "blake3",
+    *,
+    ref: str | None = None,
+) -> str:
+    return FluxelRepository(root).import_s3(
+        source_uri,
+        message,
+        identity_mode=identity_mode,
         ref=ref,
     )
 

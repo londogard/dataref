@@ -32,6 +32,7 @@ Fluxel is intentionally in MVP mode.
 ### Implemented
 
 - Commit snapshots over a dataset root (`fluxel commit`).
+- Streaming S3 imports (`fluxel import`) with `blake3` or metadata identity modes.
 - Branch-scoped staging workflow (`fluxel add`, `fluxel rm`, `fluxel status`, `fluxel commit --staged`).
 - Commit identity modes: `blake3` (default) and `meta` (`hash(path+size)`).
 - Verify command to promote metadata-only entries to canonical blobs (`fluxel verify`).
@@ -71,6 +72,8 @@ echo "hello" > /tmp/fluxel-demo/a.txt
 
 uv run fluxel commit --root /tmp/fluxel-demo -m "initial"
 uv run fluxel commit --root /tmp/fluxel-demo -m "fast metadata snapshot" --identity meta
+uv run fluxel import --root /tmp/fluxel-demo s3://my-bucket/bootstrap -m "bootstrap import"
+uv run fluxel import --root /tmp/fluxel-demo s3://my-bucket/bootstrap -m "metadata import" --identity meta
 uv run fluxel verify --root /tmp/fluxel-demo --ref main
 
 # branch-scoped staged flow

@@ -25,6 +25,7 @@ from .repository import (
     branch,
     commit,
     diff,
+    import_s3,
     rm,
     status,
     verify,
@@ -32,8 +33,12 @@ from .repository import (
 from .storage import (
     LocalStorageBackend,
     OptimisticLockError,
+    S3ObjectMetadata,
     S3StorageBackend,
     StorageBackend,
+    iter_s3_objects,
+    open_source_uri,
+    parse_s3_uri,
 )
 
 __all__ = [
@@ -64,11 +69,16 @@ __all__ = [
     "branch",
     "commit",
     "diff",
+    "import_s3",
     "rm",
     "status",
     "verify",
     "drop_analytical_index",
     "initialize_fluxel_layout",
     "query_analytical_index",
+    "S3ObjectMetadata",
     "walk_files",
+    "iter_s3_objects",
+    "open_source_uri",
+    "parse_s3_uri",
 ]

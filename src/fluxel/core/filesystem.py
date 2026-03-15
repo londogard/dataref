@@ -18,6 +18,7 @@ from fsspec.spec import AbstractFileSystem
 from .layout import blob_relpath
 from .manifest import ManifestEntry
 from .repository import FluxelRepository
+from .storage import open_source_uri
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ class FluxelFileSystem(AbstractFileSystem):
             blob_path = self._blob_path(resolved.root, resolved.entry.blob_hash)
             return io.BytesIO(blob_path.read_bytes())
         if resolved.entry.source_uri:
-            return fsspec.open(resolved.entry.source_uri, mode="rb").open()
+            return _SourceURIFile(open_source_uri(resolved.entry.source_uri))
         raise FileNotFoundError(
             "Entry has no canonical blob hash and no readable source URI"
         )
@@ -180,6 +181,38 @@ class ResolvedEntry:
     root: Path
     commit_id: str
     entry: ManifestEntry
+
+
+class _SourceURIFile(io.IOBase):
+    def __init__(self, context_manager: object) -> None:
+        self._context_manager = context_manager
+        self._handle = context_manager.__enter__()
+
+    def read(self, size: int = -1) -> bytes:
+        return self._handle.read(size)
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return bool(getattr(self._handle, "seekable", lambda: False)())
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        return self._handle.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._handle.tell()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            close = getattr(self._handle, "close", None)
+            if callable(close):
+                close()
+        finally:
+            self._context_manager.__exit__(None, None, None)
+            super().close()
 
 
 fsspec.register_implementation("fluxel", FluxelFileSystem)
