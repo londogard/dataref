@@ -601,24 +601,16 @@ class FluxelRepository:
 
     def _normalize_import_patterns(
         self,
-        path_patterns: list[object] | None,
+        path_patterns: list[str] | None,
     ) -> list[str]:
         patterns: list[str] = []
         for pattern in path_patterns or []:
-            values = pattern if isinstance(pattern, list) else [pattern]
-            for value in values:
-                normalized = str(value).strip().strip("/")
-                if not normalized:
-                    raise ValueError("Import path filter cannot be empty")
-                if (
-                    normalized.startswith("../")
-                    or "/../" in normalized
-                    or normalized == ".."
-                ):
-                    raise ValueError(
-                        "Import path filter cannot traverse outside repository root"
-                    )
-                patterns.append(normalized)
+            normalized = pattern.strip().strip("/")
+            if not normalized:
+                raise ValueError("Import path filter cannot be empty")
+            if normalized.startswith("../") or "/../" in normalized or normalized == "..":
+                raise ValueError("Import path filter cannot traverse outside repository root")
+            patterns.append(normalized)
         return patterns
 
     def _matches_import_patterns(
@@ -639,7 +631,8 @@ class FluxelRepository:
         if path.match(pattern):
             return True
         if pattern.startswith("**/"):
-            return path.match(pattern[len("**/") :])
+            stripped_pattern = pattern[len("**/") :]
+            return len(path.parts) == 1 and path.match(stripped_pattern)
         return False
 
     def _stage_path(self, branch: str) -> Path:

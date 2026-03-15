@@ -191,6 +191,16 @@ def _stage_payload(stage: object) -> dict[str, object]:
     }
 
 
+def _flatten_option_values(values: list[object]) -> list[str]:
+    flattened: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            flattened.extend(str(item) for item in value)
+            continue
+        flattened.append(str(value))
+    return flattened
+
+
 def run_cli(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv).cli
@@ -213,7 +223,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             command.source,
             command.message,
             identity_mode=command.identity,
-            path_patterns=command.path,
+            path_patterns=_flatten_option_values(command.path),
             ref=command.ref,
         )
         print(commit_id)
