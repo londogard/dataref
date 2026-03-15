@@ -74,6 +74,7 @@ uv run fluxel commit --root /tmp/fluxel-demo -m "initial"
 uv run fluxel commit --root /tmp/fluxel-demo -m "fast metadata snapshot" --identity meta
 uv run fluxel import --root /tmp/fluxel-demo s3://my-bucket/bootstrap -m "bootstrap import"
 uv run fluxel import --root /tmp/fluxel-demo s3://my-bucket/bootstrap -m "metadata import" --identity meta
+uv run fluxel import --root /tmp/fluxel-demo s3://my-bucket/bootstrap -m "jpg subset" --path "**/*.jpg" --path root.csv
 uv run fluxel verify --root /tmp/fluxel-demo --ref main
 
 # branch-scoped staged flow

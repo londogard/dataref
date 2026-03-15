@@ -43,6 +43,12 @@ class ImportArgs:
     source: str = field(positional=True, help="S3 URI to import, e.g. s3://bucket/prefix")
     message: str = field(alias=["-m", "--message"], help="Commit message")
     identity: IdentityMode = "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
+    path: list[str] = field(
+        default_factory=list,
+        alias="--path",
+        action="append",
+        help="Optional relative path/glob filter (repeatable)",
+    )
     root: str = "."  # Dataset root path
     ref: str | None = None  # Branch ref to update (defaults to current branch)
 
@@ -207,6 +213,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             command.source,
             command.message,
             identity_mode=command.identity,
+            path_patterns=command.path,
             ref=command.ref,
         )
         print(commit_id)

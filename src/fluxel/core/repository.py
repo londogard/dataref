@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import PurePosixPath
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -187,6 +188,7 @@ class FluxelRepository:
         message: str,
         identity_mode: Literal["blake3", "meta"] = "blake3",
         *,
+        path_patterns: list[str] | None = None,
         ref: str | None = None,
     ) -> str:
         if not message.strip():
@@ -197,7 +199,11 @@ class FluxelRepository:
         self._ensure_branch_exists(branch)
 
         temp_manifest = self._write_temp_manifest(
-            self._materialize_s3_entries(source_uri=source_uri, identity_mode=identity_mode)
+            self._materialize_s3_entries(
+                source_uri=source_uri,
+                identity_mode=identity_mode,
+                path_patterns=path_patterns,
+            )
         )
         manifest_hash = blake3_digest_file(temp_manifest)
         manifest_target = self.layout.manifests_dir / f"{manifest_hash}.jsonl"
@@ -496,9 +502,11 @@ class FluxelRepository:
         *,
         source_uri: str,
         identity_mode: str,
+        path_patterns: list[str] | None = None,
     ) -> Iterator[ManifestEntry]:
         _, prefix = parse_s3_uri(source_uri)
         normalized_prefix = prefix.strip("/")
+        normalized_patterns = self._normalize_import_patterns(path_patterns)
         for obj in iter_s3_objects(source_uri):
             relative_path = self._normalize_s3_import_path(
                 key=obj.key,
@@ -506,6 +514,8 @@ class FluxelRepository:
                 size=obj.size,
             )
             if relative_path is None:
+                continue
+            if not self._matches_import_patterns(relative_path, normalized_patterns):
                 continue
             if identity_mode == "blake3":
                 identity_value = self._store_blob_from_source_uri(obj.source_uri)
@@ -588,6 +598,49 @@ class FluxelRepository:
         else:
             relative_path = normalized_key
         return self._normalize_stage_path(relative_path)
+
+    def _normalize_import_patterns(
+        self,
+        path_patterns: list[object] | None,
+    ) -> list[str]:
+        patterns: list[str] = []
+        for pattern in path_patterns or []:
+            values = pattern if isinstance(pattern, list) else [pattern]
+            for value in values:
+                normalized = str(value).strip().strip("/")
+                if not normalized:
+                    raise ValueError("Import path filter cannot be empty")
+                if (
+                    normalized.startswith("../")
+                    or "/../" in normalized
+                    or normalized == ".."
+                ):
+                    raise ValueError(
+                        "Import path filter cannot traverse outside repository root"
+                    )
+                patterns.append(normalized)
+        return patterns
+
+    def _matches_import_patterns(
+        self,
+        relative_path: str,
+        path_patterns: list[str],
+    ) -> bool:
+        if not path_patterns:
+            return True
+        path = PurePosixPath(relative_path)
+        return any(self._match_import_pattern(path, pattern) for pattern in path_patterns)
+
+    def _match_import_pattern(
+        self,
+        path: PurePosixPath,
+        pattern: str,
+    ) -> bool:
+        if path.match(pattern):
+            return True
+        if pattern.startswith("**/"):
+            return path.match(pattern[len("**/") :])
+        return False
 
     def _stage_path(self, branch: str) -> Path:
         return self.layout.staging_dir / f"{branch}.json"
@@ -784,12 +837,14 @@ def import_s3(
     message: str,
     identity_mode: str = "blake3",
     *,
+    path_patterns: list[str] | None = None,
     ref: str | None = None,
 ) -> str:
     return FluxelRepository(root).import_s3(
         source_uri,
         message,
         identity_mode=identity_mode,
+        path_patterns=path_patterns,
         ref=ref,
     )
 

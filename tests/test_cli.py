@@ -370,3 +370,78 @@ def test_cli_import_s3_metadata_entries_can_be_read_and_verified(
     assert verify_payload["created_commit"] is True
     assert verify_payload["verified_entries"] == 2
     assert verify_payload["commit_id"] != first_commit
+
+
+def test_cli_import_s3_supports_repeated_path_filters(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    install_fake_s3(
+        monkeypatch,
+        {
+            "gallery/root.jpg": b"root-jpg",
+            "gallery/root.txt": b"root-txt",
+            "gallery/nested/photo.jpg": b"nested-jpg",
+            "gallery/nested/notes.txt": b"nested-txt",
+        },
+    )
+
+    assert (
+        run_cli(
+            [
+                "import",
+                "--root",
+                str(tmp_path),
+                "s3://demo-bucket/gallery",
+                "-m",
+                "filtered import",
+                "--path",
+                "**/*.jpg",
+                "--path",
+                "root.txt",
+            ]
+        )
+        == 0
+    )
+    commit_id = capsys.readouterr().out.strip()
+    assert len(commit_id) == 64
+
+    manifest_path = next((tmp_path / ".fluxel" / "manifests").glob("*.jsonl"))
+    entries = list(ManifestReader(manifest_path).iter_entries())
+    assert [entry.path for entry in entries] == [
+        "nested/photo.jpg",
+        "root.jpg",
+        "root.txt",
+    ]
+
+
+def test_cli_import_s3_path_star_imports_all_entries(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    install_fake_s3(
+        monkeypatch,
+        {
+            "all/a.txt": b"a",
+            "all/nested/b.jpg": b"b",
+        },
+    )
+
+    assert (
+        run_cli(
+            [
+                "import",
+                "--root",
+                str(tmp_path),
+                "s3://demo-bucket/all",
+                "-m",
+                "all entries",
+                "--path",
+                "*",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    manifest_path = next((tmp_path / ".fluxel" / "manifests").glob("*.jsonl"))
+    entries = list(ManifestReader(manifest_path).iter_entries())
+    assert [entry.path for entry in entries] == ["a.txt", "nested/b.jpg"]
