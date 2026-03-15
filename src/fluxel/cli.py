@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+
+from simple_parsing import ArgumentParser
+from simple_parsing.helpers import field, flag, subparsers
 
 from .core import (
     FluxelRepository,
@@ -18,194 +22,210 @@ from .core import (
 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="fluxel", description="Fluxel CLI")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+IdentityMode = Literal["blake3", "meta"]
 
-    commit_parser = subparsers.add_parser("commit", help="Create a commit")
-    commit_parser.add_argument("-m", "--message", required=True, help="Commit message")
-    commit_parser.add_argument("--root", default=".", help="Dataset root path")
-    commit_parser.add_argument(
-        "--identity",
-        choices=["blake3", "meta"],
-        default="blake3",
-        help="Identity strategy: full-content blake3 or metadata hash(path+size)",
-    )
-    commit_parser.add_argument(
-        "--staged",
-        action="store_true",
+
+@dataclass
+class CommitArgs:
+    identity: IdentityMode = "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
+    message: str = field(alias=["-m", "--message"], help="Commit message")
+    root: str = "."  # "Dataset root path"
+    staged: bool = flag(
+        False,
         help="Commit only staged changes for a branch",
     )
-    commit_parser.add_argument(
-        "--ref",
-        default=None,
-        help="Branch ref to update (defaults to current branch)",
-    )
+    ref: str | None = None  # Branch ref to update (defaults to current branch)
 
-    add_parser = subparsers.add_parser("add", help="Stage files for commit")
-    add_parser.add_argument("paths", nargs="+", help="Paths to stage")
-    add_parser.add_argument("--root", default=".", help="Dataset root path")
-    add_parser.add_argument(
-        "--ref",
-        default=None,
-        help="Branch ref for staging (defaults to current branch)",
-    )
-    add_parser.add_argument(
-        "--identity",
-        choices=["blake3", "meta"],
-        default="blake3",
-        help="Identity strategy for staged additions",
-    )
 
-    rm_parser = subparsers.add_parser("rm", help="Stage file removals")
-    rm_parser.add_argument("paths", nargs="+", help="Paths to remove")
-    rm_parser.add_argument("--root", default=".", help="Dataset root path")
-    rm_parser.add_argument(
-        "--ref",
+@dataclass
+class AddArgs:
+    identity: IdentityMode = "blake3"  # Identity strategy for staged additions
+    paths: list[str] = field(positional=True, nargs="+", help="Paths to stage")
+    root: str = field(default=".", help="Dataset root path")
+    ref: str | None = field(
         default=None,
         help="Branch ref for staging (defaults to current branch)",
     )
 
-    status_parser = subparsers.add_parser("status", help="Show staged status")
-    status_parser.add_argument("--root", default=".", help="Dataset root path")
-    status_parser.add_argument(
-        "--ref",
+
+@dataclass
+class RmArgs:
+    paths: list[str] = field(positional=True, nargs="+", help="Paths to remove")
+    root: str = field(default=".", help="Dataset root path")
+    ref: str | None = field(
         default=None,
         help="Branch ref for staging (defaults to current branch)",
     )
 
-    branch_parser = subparsers.add_parser("branch", help="Create a branch pointer")
-    branch_parser.add_argument("name", help="Branch name")
-    branch_parser.add_argument("--root", default=".", help="Dataset root path")
 
-    diff_parser = subparsers.add_parser(
-        "diff", help="Diff two refs using metadata only"
+@dataclass
+class StatusArgs:
+    root: str = field(default=".", help="Dataset root path")
+    ref: str | None = field(
+        default=None,
+        help="Branch ref for staging (defaults to current branch)",
     )
-    diff_parser.add_argument("from_ref", help="Source ref (branch or commit)")
-    diff_parser.add_argument("to_ref", help="Target ref (branch or commit)")
-    diff_parser.add_argument("--root", default=".", help="Dataset root path")
 
-    verify_parser = subparsers.add_parser(
-        "verify",
-        help="Promote metadata-only entries to canonical blake3 blobs",
-    )
-    verify_parser.add_argument("--root", default=".", help="Dataset root path")
-    verify_parser.add_argument("--ref", default="main", help="Branch ref to verify")
-    verify_parser.add_argument(
-        "--path",
+
+@dataclass
+class BranchArgs:
+    name: str = field(positional=True, help="Branch name")
+    root: str = field(default=".", help="Dataset root path")
+
+
+@dataclass
+class DiffArgs:
+    from_ref: str = field(positional=True, help="Source ref (branch or commit)")
+    to_ref: str = field(positional=True, help="Target ref (branch or commit)")
+    root: str = "."  # Dataset root path
+
+
+@dataclass
+class VerifyArgs:
+    root: str = "."  # Dataset root path
+    ref: str = "main"  # Branch ref to verify
+    path: list[str] = field(
+        default_factory=list,
+        alias="--path",
         action="append",
-        default=None,
         help="Optional path/prefix filter (repeatable)",
     )
-    verify_parser.add_argument(
-        "--dry-run",
-        action="store_true",
+    dry_run: bool = flag(
+        False,
+        alias="--dry-run",
         help="Report entries that would be verified without writing blobs or commits",
     )
 
-    index_parser = subparsers.add_parser("index", help="Manage analytical index")
-    index_sub = index_parser.add_subparsers(dest="index_command", required=True)
 
-    index_build = index_sub.add_parser(
-        "build", help="Build disposable analytical index"
+@dataclass
+class IndexBuildArgs:
+    root: str = "."  # Dataset root path
+    ref: str = "main"  # Ref to index
+    output_dir: str | None = field(
+        default=None,
+        alias="--output-dir",
+        help="Output directory for index",
     )
-    index_build.add_argument("--root", default=".", help="Dataset root path")
-    index_build.add_argument("--ref", default="main", help="Ref to index")
-    index_build.add_argument(
-        "--output-dir", default=None, help="Output directory for index"
-    )
-    index_build.add_argument(
-        "--parquet",
-        action="store_true",
+    parquet: bool = flag(
+        False,
         help="Also export Parquet from the index table",
     )
 
-    index_query = index_sub.add_parser("query", help="Run SQL query against index")
-    index_query.add_argument("--db", required=True, help="Path to DuckDB index file")
-    index_query.add_argument("--sql", required=True, help="SQL query to execute")
 
-    index_drop = index_sub.add_parser("drop", help="Delete disposable analytical index")
-    index_drop.add_argument("--db", required=True, help="Path to DuckDB index file")
+@dataclass
+class IndexQueryArgs:
+    db: str  # Path to DuckDB index file
+    sql: str  # SQL query to execute
 
+
+@dataclass
+class IndexDropArgs:
+    db: str  # Path to DuckDB index file
+
+
+@dataclass
+class IndexArgs:
+    command: IndexBuildArgs | IndexQueryArgs | IndexDropArgs = subparsers(
+        {
+            "build": IndexBuildArgs,
+            "query": IndexQueryArgs,
+            "drop": IndexDropArgs,
+        }
+    )
+
+
+@dataclass
+class FluxelCLI:
+    command: (
+        CommitArgs
+        | AddArgs
+        | RmArgs
+        | StatusArgs
+        | BranchArgs
+        | DiffArgs
+        | VerifyArgs
+        | IndexArgs
+    ) = subparsers(
+        {
+            "commit": CommitArgs,
+            "add": AddArgs,
+            "rm": RmArgs,
+            "status": StatusArgs,
+            "branch": BranchArgs,
+            "diff": DiffArgs,
+            "verify": VerifyArgs,
+            "index": IndexArgs,
+        }
+    )
+
+
+def build_parser() -> ArgumentParser:
+    parser = ArgumentParser(prog="fluxel", description="Fluxel CLI")
+    parser.add_arguments(FluxelCLI, dest="cli")
     return parser
+
+
+def _stage_payload(stage: object) -> dict[str, object]:
+    return {
+        "ref": stage.ref,
+        "added": stage.added,
+        "removed": stage.removed,
+    }
 
 
 def run_cli(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argv).cli
+    command = args.command
 
-    if args.command == "commit":
+    if isinstance(command, CommitArgs):
         commit_id = commit(
-            Path(args.root),
-            args.message,
-            identity_mode=args.identity,
-            staged=args.staged,
-            ref=args.ref,
+            Path(command.root),
+            command.message,
+            identity_mode=command.identity,
+            staged=command.staged,
+            ref=command.ref,
         )
         print(commit_id)
         return 0
 
-    if args.command == "add":
+    if isinstance(command, AddArgs):
         stage = add(
-            root=Path(args.root),
-            paths=args.paths,
-            ref=args.ref,
-            identity_mode=args.identity,
+            root=Path(command.root),
+            paths=command.paths,
+            ref=command.ref,
+            identity_mode=command.identity,
         )
-        print(
-            json.dumps(
-                {
-                    "ref": stage.ref,
-                    "added": stage.added,
-                    "removed": stage.removed,
-                },
-                indent=2,
-            )
-        )
+        print(json.dumps(_stage_payload(stage), indent=2))
         return 0
 
-    if args.command == "rm":
+    if isinstance(command, RmArgs):
         stage = rm(
-            root=Path(args.root),
-            paths=args.paths,
-            ref=args.ref,
+            root=Path(command.root),
+            paths=command.paths,
+            ref=command.ref,
         )
-        print(
-            json.dumps(
-                {
-                    "ref": stage.ref,
-                    "added": stage.added,
-                    "removed": stage.removed,
-                },
-                indent=2,
-            )
-        )
+        print(json.dumps(_stage_payload(stage), indent=2))
         return 0
 
-    if args.command == "status":
+    if isinstance(command, StatusArgs):
         stage = status(
-            root=Path(args.root),
-            ref=args.ref,
+            root=Path(command.root),
+            ref=command.ref,
         )
-        print(
-            json.dumps(
-                {
-                    "ref": stage.ref,
-                    "added": stage.added,
-                    "removed": stage.removed,
-                },
-                indent=2,
-            )
-        )
+        print(json.dumps(_stage_payload(stage), indent=2))
         return 0
 
-    if args.command == "branch":
-        branch_path = FluxelRepository(Path(args.root)).branch(args.name)
+    if isinstance(command, BranchArgs):
+        branch_path = FluxelRepository(Path(command.root)).branch(command.name)
         print(str(branch_path))
         return 0
 
-    if args.command == "diff":
-        changes = FluxelRepository(Path(args.root)).diff(args.from_ref, args.to_ref)
+    if isinstance(command, DiffArgs):
+        changes = FluxelRepository(Path(command.root)).diff(
+            command.from_ref,
+            command.to_ref,
+        )
         payload = [
             {
                 "path": change.path,
@@ -220,12 +240,12 @@ def run_cli(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
-    if args.command == "verify":
+    if isinstance(command, VerifyArgs):
         result = verify(
-            root=Path(args.root),
-            ref=args.ref,
-            path_prefixes=args.path,
-            dry_run=args.dry_run,
+            root=Path(command.root),
+            ref=command.ref,
+            path_prefixes=command.path,
+            dry_run=command.dry_run,
         )
         payload = {
             "commit_id": result.commit_id,
@@ -238,13 +258,14 @@ def run_cli(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
-    if args.command == "index":
-        if args.index_command == "build":
+    if isinstance(command, IndexArgs):
+        index_command = command.command
+        if isinstance(index_command, IndexBuildArgs):
             paths = build_analytical_index(
-                root=Path(args.root),
-                ref=args.ref,
-                output_dir=args.output_dir,
-                export_parquet=args.parquet,
+                root=Path(index_command.root),
+                ref=index_command.ref,
+                output_dir=index_command.output_dir,
+                export_parquet=index_command.parquet,
             )
             result = {
                 "database_path": str(paths.database_path),
@@ -253,13 +274,13 @@ def run_cli(argv: list[str] | None = None) -> int:
             print(json.dumps(result, indent=2))
             return 0
 
-        if args.index_command == "query":
-            rows = query_analytical_index(args.db, args.sql)
+        if isinstance(index_command, IndexQueryArgs):
+            rows = query_analytical_index(index_command.db, index_command.sql)
             print(json.dumps(rows))
             return 0
 
-        if args.index_command == "drop":
-            drop_analytical_index(args.db)
+        if isinstance(index_command, IndexDropArgs):
+            drop_analytical_index(index_command.db)
             print("ok")
             return 0
 
