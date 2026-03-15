@@ -27,7 +27,7 @@ IdentityMode = Literal["blake3", "meta"]
 
 @dataclass
 class CommitArgs:
-    identity: IdentityMode  # Identity strategy: full-content blake3 or metadata hash(path+size)"
+    identity: IdentityMode = "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
     message: str = field(alias=["-m", "--message"], help="Commit message")
     root: str = "."  # "Dataset root path"
     staged: bool = flag(
@@ -39,7 +39,7 @@ class CommitArgs:
 
 @dataclass
 class AddArgs:
-    identity: IdentityMode  # Identity strategy for staged additions
+    identity: IdentityMode = "blake3"  # Identity strategy for staged additions
     paths: list[str] = field(positional=True, nargs="+", help="Paths to stage")
     root: str = field(default=".", help="Dataset root path")
     ref: str | None = field(
