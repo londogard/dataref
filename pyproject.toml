@@ -1,0 +1,26 @@
+[project]
+name = "fluxel"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Hampus Londögård", email = "hampus.londogard@verisure.com" },
+]
+requires-python = ">=3.11"
+dependencies = [
+    "blake3>=1.0.8",
+    "boto3>=1.42.57",
+    "duckdb>=1.4.4",
+    "fsspec>=2026.2.0",
+    "simple-parsing>=0.1.7",
+]
+
+[project.scripts]
+fluxel = "fluxel:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=9.0.2"]
