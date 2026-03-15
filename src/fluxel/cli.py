@@ -194,6 +194,8 @@ def _stage_payload(stage: object) -> dict[str, object]:
 def _flatten_option_values(values: list[object]) -> list[str]:
     flattened: list[str] = []
     for value in values:
+        # `simple_parsing` may surface repeated list-valued flags as nested lists
+        # (e.g. [['**/*.jpg'], ['root.txt']]) for this dataclass field shape.
         if isinstance(value, list):
             flattened.extend(str(item) for item in value)
             continue
