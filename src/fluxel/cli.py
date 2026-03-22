@@ -286,7 +286,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         result = verify(
             root=Path(command.root),
             ref=command.ref,
-            path_prefixes=command.path,
+            path_prefixes=_flatten_option_values(command.path),
             dry_run=command.dry_run,
         )
         payload = {

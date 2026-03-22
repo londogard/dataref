@@ -445,3 +445,154 @@ def test_cli_import_s3_path_star_imports_all_entries(
     manifest_path = next((tmp_path / ".fluxel" / "manifests").glob("*.jsonl"))
     entries = list(ManifestReader(manifest_path).iter_entries())
     assert [entry.path for entry in entries] == ["a.txt", "nested/b.jpg"]
+
+
+def test_cli_dataset_can_mix_s3_meta_local_blake3_and_verified_s3_entries(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    install_fake_s3(
+        monkeypatch,
+        {
+            "dataset/root.txt": b"root-from-s3",
+            "dataset/images/cat.jpg": b"cat-image",
+            "dataset/images/dog.jpg": b"dog-image",
+            "dataset/docs/readme.md": b"ignored",
+        },
+    )
+
+    assert (
+        run_cli(
+            [
+                "import",
+                "--root",
+                str(tmp_path),
+                "s3://demo-bucket/dataset",
+                "-m",
+                "bootstrap metadata import",
+                "--identity",
+                "meta",
+                "--path",
+                "root.txt",
+                "--path",
+                "**/*.jpg",
+            ]
+        )
+        == 0
+    )
+    first_commit = capsys.readouterr().out.strip()
+    assert len(first_commit) == 64
+    assert (tmp_path / ".fluxel").exists()
+
+    (tmp_path / "local").mkdir()
+    (tmp_path / "local" / "one.txt").write_text("one")
+    (tmp_path / "local" / "two.txt").write_text("two")
+
+    assert (
+        run_cli(
+            [
+                "add",
+                "--root",
+                str(tmp_path),
+                "--identity",
+                "blake3",
+                "local/one.txt",
+                "local/two.txt",
+            ]
+        )
+        == 0
+    )
+    add_payload = json.loads(capsys.readouterr().out)
+    assert add_payload["added"] == ["local/one.txt", "local/two.txt"]
+
+    assert (
+        run_cli(
+            [
+                "commit",
+                "--root",
+                str(tmp_path),
+                "--staged",
+                "-m",
+                "add local blake3 files",
+            ]
+        )
+        == 0
+    )
+    second_commit = capsys.readouterr().out.strip()
+    assert len(second_commit) == 64
+    assert second_commit != first_commit
+
+    assert (
+        run_cli(
+            [
+                "verify",
+                "--root",
+                str(tmp_path),
+                "--ref",
+                "main",
+                "--path",
+                "root.txt",
+                "--path",
+                "images/cat.jpg",
+            ]
+        )
+        == 0
+    )
+    verify_payload = json.loads(capsys.readouterr().out)
+    assert verify_payload["created_commit"] is True
+    assert verify_payload["verified_entries"] == 2
+
+    commit_payload = json.loads(
+        (
+            tmp_path / ".fluxel" / "commits" / f"{verify_payload['commit_id']}.json"
+        ).read_text()
+    )
+    manifest_path = (
+        tmp_path / ".fluxel" / "manifests" / f"{commit_payload['manifest']}.jsonl"
+    )
+    entries = {entry.path: entry for entry in ManifestReader(manifest_path).iter_entries()}
+
+    assert sorted(entries) == [
+        "images/cat.jpg",
+        "images/dog.jpg",
+        "local/one.txt",
+        "local/two.txt",
+        "root.txt",
+    ]
+
+    assert entries["root.txt"].identity_mode == "blake3"
+    assert entries["root.txt"].blob_hash is not None
+    assert entries["images/cat.jpg"].identity_mode == "blake3"
+    assert entries["images/cat.jpg"].blob_hash is not None
+    assert entries["images/dog.jpg"].identity_mode == "meta"
+    assert entries["images/dog.jpg"].blob_hash is None
+    assert entries["local/one.txt"].identity_mode == "blake3"
+    assert entries["local/one.txt"].blob_hash is not None
+    assert entries["local/two.txt"].identity_mode == "blake3"
+    assert entries["local/two.txt"].blob_hash is not None
+
+    assert run_cli(["index", "build", "--root", str(tmp_path)]) == 0
+    build_payload = json.loads(capsys.readouterr().out)
+    db_path = Path(build_payload["database_path"])
+    assert db_path.exists()
+
+    assert (
+        run_cli(
+            [
+                "index",
+                "query",
+                "--db",
+                str(db_path),
+                "--sql",
+                "SELECT path FROM files ORDER BY path",
+            ]
+        )
+        == 0
+    )
+    query_payload = json.loads(capsys.readouterr().out)
+    assert query_payload == [
+        ["images/cat.jpg"],
+        ["images/dog.jpg"],
+        ["local/one.txt"],
+        ["local/two.txt"],
+        ["root.txt"],
+    ]
