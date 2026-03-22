@@ -18,7 +18,7 @@ from typing import Iterator, Literal
 from blake3 import blake3
 
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file
-from .layout import FluxelLayout, blob_relpath, initialize_fluxel_layout
+from .layout import blob_relpath, initialize_fluxel_layout
 from .manifest import ManifestEntry, ManifestReader, ManifestWriter, walk_files
 from .storage import iter_s3_objects, open_source_uri, parse_s3_uri
 
@@ -54,6 +54,14 @@ class VerifyResult:
     total_entries: int
     created_commit: bool
     dry_run: bool
+
+
+@dataclass(frozen=True)
+class MergeResult:
+    source_ref: str
+    target_ref: str
+    commit_id: str
+    updated: bool
 
 
 @dataclass(frozen=True)
@@ -144,6 +152,39 @@ class FluxelRepository:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(f"{head_commit}\n" if head_commit else "", encoding="utf-8")
         return target
+
+    def merge(self, source_ref: str, target_ref: str) -> MergeResult:
+        if not source_ref:
+            raise ValueError("Source ref cannot be empty")
+        if not target_ref:
+            raise ValueError("Target ref cannot be empty")
+
+        self._ensure_branch_exists(target_ref)
+        source_commit = self.resolve_ref(source_ref)
+        target_commit = self.resolve_ref(target_ref)
+
+        if source_commit == target_commit:
+            return MergeResult(
+                source_ref=source_ref,
+                target_ref=target_ref,
+                commit_id=target_commit,
+                updated=False,
+            )
+
+        if not self._is_ancestor(
+            ancestor_commit=target_commit, descendant_commit=source_commit
+        ):
+            raise ValueError(
+                f"Cannot fast-forward {target_ref} to {source_ref}: target is not an ancestor"
+            )
+
+        self._branch_path(target_ref).write_text(f"{source_commit}\n", encoding="utf-8")
+        return MergeResult(
+            source_ref=source_ref,
+            target_ref=target_ref,
+            commit_id=source_commit,
+            updated=True,
+        )
 
     def commit(
         self,
@@ -608,8 +649,14 @@ class FluxelRepository:
             normalized = pattern.strip().strip("/")
             if not normalized:
                 raise ValueError("Import path filter cannot be empty")
-            if normalized.startswith("../") or "/../" in normalized or normalized == "..":
-                raise ValueError("Import path filter cannot traverse outside repository root")
+            if (
+                normalized.startswith("../")
+                or "/../" in normalized
+                or normalized == ".."
+            ):
+                raise ValueError(
+                    "Import path filter cannot traverse outside repository root"
+                )
             patterns.append(normalized)
         return patterns
 
@@ -621,7 +668,9 @@ class FluxelRepository:
         if not path_patterns:
             return True
         path = PurePosixPath(relative_path)
-        return any(self._match_import_pattern(path, pattern) for pattern in path_patterns)
+        return any(
+            self._match_import_pattern(path, pattern) for pattern in path_patterns
+        )
 
     def _match_import_pattern(
         self,
@@ -688,6 +737,14 @@ class FluxelRepository:
             return None
         value = branch_path.read_text(encoding="utf-8").strip()
         return value or None
+
+    def _is_ancestor(self, *, ancestor_commit: str, descendant_commit: str) -> bool:
+        current_commit: str | None = descendant_commit
+        while current_commit:
+            if current_commit == ancestor_commit:
+                return True
+            current_commit = self.read_commit(current_commit).parent
+        return False
 
     def _write_commit_object(
         self,
@@ -844,6 +901,10 @@ def import_s3(
 
 def branch(root: str | Path, name: str) -> Path:
     return FluxelRepository(root).branch(name)
+
+
+def merge(root: str | Path, source_ref: str, target_ref: str) -> MergeResult:
+    return FluxelRepository(root).merge(source_ref, target_ref)
 
 
 def add(

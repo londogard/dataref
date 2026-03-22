@@ -16,6 +16,7 @@ from .core import (
     commit,
     drop_analytical_index,
     import_s3,
+    merge,
     query_analytical_index,
     rm,
     status,
@@ -29,7 +30,9 @@ IdentityMode = Literal["blake3", "meta"]
 @dataclass
 class CommitArgs:
     message: str = field(alias=["-m", "--message"], help="Commit message")
-    identity: IdentityMode = "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
+    identity: IdentityMode = (
+        "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
+    )
     root: str = "."  # "Dataset root path"
     staged: bool = flag(
         False,
@@ -40,9 +43,13 @@ class CommitArgs:
 
 @dataclass
 class ImportArgs:
-    source: str = field(positional=True, help="S3 URI to import, e.g. s3://bucket/prefix")
+    source: str = field(
+        positional=True, help="S3 URI to import, e.g. s3://bucket/prefix"
+    )
     message: str = field(alias=["-m", "--message"], help="Commit message")
-    identity: IdentityMode = "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
+    identity: IdentityMode = (
+        "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
+    )
     path_patterns: list[str] = field(
         default_factory=list,
         alias="--path",
@@ -93,6 +100,13 @@ class BranchArgs:
 class DiffArgs:
     from_ref: str = field(positional=True, help="Source ref (branch or commit)")
     to_ref: str = field(positional=True, help="Target ref (branch or commit)")
+    root: str = "."  # Dataset root path
+
+
+@dataclass
+class MergeArgs:
+    source_ref: str = field(positional=True, help="Ref to merge from")
+    target_ref: str = field(positional=True, help="Branch ref to fast-forward")
     root: str = "."  # Dataset root path
 
 
@@ -160,6 +174,7 @@ class FluxelCLI:
         | StatusArgs
         | BranchArgs
         | DiffArgs
+        | MergeArgs
         | VerifyArgs
         | IndexArgs
     ) = subparsers(
@@ -171,6 +186,7 @@ class FluxelCLI:
             "status": StatusArgs,
             "branch": BranchArgs,
             "diff": DiffArgs,
+            "merge": MergeArgs,
             "verify": VerifyArgs,
             "index": IndexArgs,
         }
@@ -280,6 +296,29 @@ def run_cli(argv: list[str] | None = None) -> int:
             for change in changes
         ]
         print(json.dumps(payload, indent=2))
+        return 0
+
+    if isinstance(command, MergeArgs):
+        try:
+            result = merge(
+                root=Path(command.root),
+                source_ref=command.source_ref,
+                target_ref=command.target_ref,
+            )
+        except ValueError as error:
+            print(f"merge error: {error}", file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                {
+                    "source_ref": result.source_ref,
+                    "target_ref": result.target_ref,
+                    "commit_id": result.commit_id,
+                    "updated": result.updated,
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if isinstance(command, VerifyArgs):

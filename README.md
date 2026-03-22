@@ -37,6 +37,7 @@ Fluxel is intentionally in MVP mode.
 - Commit identity modes: `blake3` (default) and `meta` (`hash(path+size)`).
 - Verify command to promote metadata-only entries to canonical blobs (`fluxel verify`).
 - Zero-copy branch pointers (`fluxel branch`).
+- Fast-forward-only branch merge (`fluxel merge`).
 - Metadata-only diff between refs (`fluxel diff`).
 - Disposable analytical index from manifest (`fluxel index build/query/drop`, DuckDB + optional Parquet export).
 - `fsspec` provider for `fluxel://` URI reads.
@@ -82,6 +83,7 @@ uv run fluxel branch --root /tmp/fluxel-demo feature
 uv run fluxel add --root /tmp/fluxel-demo --ref feature data/new.csv
 uv run fluxel status --root /tmp/fluxel-demo --ref feature
 uv run fluxel commit --root /tmp/fluxel-demo --ref feature --staged -m "feature updates"
+uv run fluxel merge --root /tmp/fluxel-demo feature main
 
 echo "hello v2" > /tmp/fluxel-demo/a.txt
 uv run fluxel commit --root /tmp/fluxel-demo -m "update"
@@ -146,6 +148,19 @@ uv run fluxel verify --root /tmp/fluxel-demo --ref main --dry-run
 - `--dry-run` reports how many entries would be promoted without changing blobs/commits.
 - Reads bytes from each entry's `source_uri`, computes Blake3, and stores canonical blob content.
 - Writes a new commit only when at least one entry is promoted.
+
+## Merge Command
+
+`fluxel merge` updates a target branch by fast-forward only:
+
+```bash
+uv run fluxel merge --root /tmp/fluxel-demo feature main
+```
+
+- The source ref can be a branch or commit.
+- The target ref must be a branch.
+- The merge succeeds only when the target branch head is an ancestor of the source ref.
+- Non-fast-forward merges are rejected.
 
 ## Repository Layout
 

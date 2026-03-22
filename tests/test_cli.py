@@ -283,6 +283,114 @@ def test_cli_staging_commit_is_branch_scoped(tmp_path: Path, capsys) -> None:
     ]
 
 
+def test_cli_merge_fast_forwards_target_branch(tmp_path: Path, capsys) -> None:
+    (tmp_path / "shared.txt").write_text("base")
+    assert run_cli(["commit", "--root", str(tmp_path), "-m", "base"]) == 0
+    base_commit = capsys.readouterr().out.strip()
+    assert base_commit
+
+    assert run_cli(["branch", "--root", str(tmp_path), "feature"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "feature.txt").write_text("feature")
+    assert (
+        run_cli(
+            [
+                "add",
+                "--root",
+                str(tmp_path),
+                "--ref",
+                "feature",
+                "feature.txt",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert (
+        run_cli(
+            [
+                "commit",
+                "--root",
+                str(tmp_path),
+                "--ref",
+                "feature",
+                "--staged",
+                "-m",
+                "feature commit",
+            ]
+        )
+        == 0
+    )
+    feature_commit = capsys.readouterr().out.strip()
+    assert feature_commit and feature_commit != base_commit
+
+    assert run_cli(["merge", "--root", str(tmp_path), "feature", "main"]) == 0
+    merge_payload = json.loads(capsys.readouterr().out)
+    assert merge_payload == {
+        "source_ref": "feature",
+        "target_ref": "main",
+        "commit_id": feature_commit,
+        "updated": True,
+    }
+
+    assert run_cli(["diff", "--root", str(tmp_path), "main", "feature"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_cli_merge_rejects_non_fast_forward(tmp_path: Path, capsys) -> None:
+    (tmp_path / "shared.txt").write_text("base")
+    assert run_cli(["commit", "--root", str(tmp_path), "-m", "base"]) == 0
+    capsys.readouterr()
+
+    assert run_cli(["branch", "--root", str(tmp_path), "feature"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "main.txt").write_text("main")
+    assert run_cli(["commit", "--root", str(tmp_path), "-m", "main commit"]) == 0
+    main_commit = capsys.readouterr().out.strip()
+    assert main_commit
+
+    (tmp_path / "feature.txt").write_text("feature")
+    assert (
+        run_cli(
+            [
+                "add",
+                "--root",
+                str(tmp_path),
+                "--ref",
+                "feature",
+                "feature.txt",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert (
+        run_cli(
+            [
+                "commit",
+                "--root",
+                str(tmp_path),
+                "--ref",
+                "feature",
+                "--staged",
+                "-m",
+                "feature commit",
+            ]
+        )
+        == 0
+    )
+    feature_commit = capsys.readouterr().out.strip()
+    assert feature_commit and feature_commit != main_commit
+
+    assert run_cli(["merge", "--root", str(tmp_path), "feature", "main"]) == 2
+    stderr = capsys.readouterr().err
+    assert "merge error: Cannot fast-forward" in stderr
+
+
 def test_cli_import_s3_writes_manifest_and_blobs(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
@@ -322,7 +430,9 @@ def test_cli_import_s3_writes_manifest_and_blobs(
         "s3://demo-bucket/bootstrap/nested/b.txt",
     }
     for entry in entries:
-        blob_path = tmp_path / ".fluxel" / "blobs" / entry.blob_hash[:2] / entry.blob_hash[2:]
+        blob_path = (
+            tmp_path / ".fluxel" / "blobs" / entry.blob_hash[:2] / entry.blob_hash[2:]
+        )
         assert blob_path.exists()
 
 
@@ -549,7 +659,9 @@ def test_cli_dataset_can_mix_s3_meta_local_blake3_and_verified_s3_entries(
     manifest_path = (
         tmp_path / ".fluxel" / "manifests" / f"{commit_payload['manifest']}.jsonl"
     )
-    entries = {entry.path: entry for entry in ManifestReader(manifest_path).iter_entries()}
+    entries = {
+        entry.path: entry for entry in ManifestReader(manifest_path).iter_entries()
+    }
 
     assert sorted(entries) == [
         "images/cat.jpg",
@@ -596,3 +708,105 @@ def test_cli_dataset_can_mix_s3_meta_local_blake3_and_verified_s3_entries(
         ["local/two.txt"],
         ["root.txt"],
     ]
+
+
+def test_cli_meta_import_branch_removal_and_fast_forward_merge(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    install_fake_s3(
+        monkeypatch,
+        {
+            "images/image0.jpg": b"image-0",
+            "images/image1.jpg": b"image-1",
+            "images/nested/photo0.jpg": b"photo-0",
+            "images/nested/photo1.jpg": b"photo-1",
+            "images/notes.txt": b"ignore-me",
+        },
+    )
+
+    assert (
+        run_cli(
+            [
+                "import",
+                "--root",
+                str(tmp_path),
+                "s3://demo-bucket/images",
+                "-m",
+                "import jpg metadata",
+                "--identity",
+                "meta",
+                "--path",
+                "**/*.jpg",
+            ]
+        )
+        == 0
+    )
+    main_commit = capsys.readouterr().out.strip()
+    assert len(main_commit) == 64
+
+    assert run_cli(["branch", "--root", str(tmp_path), "feature"]) == 0
+    capsys.readouterr()
+
+    assert (
+        run_cli(
+            [
+                "rm",
+                "--root",
+                str(tmp_path),
+                "--ref",
+                "feature",
+                "image0.jpg",
+                "nested/photo0.jpg",
+            ]
+        )
+        == 0
+    )
+    rm_payload = json.loads(capsys.readouterr().out)
+    assert rm_payload["removed"] == ["image0.jpg", "nested/photo0.jpg"]
+
+    assert (
+        run_cli(
+            [
+                "commit",
+                "--root",
+                str(tmp_path),
+                "--ref",
+                "feature",
+                "--staged",
+                "-m",
+                "remove zero-suffixed jpgs",
+            ]
+        )
+        == 0
+    )
+    feature_commit = capsys.readouterr().out.strip()
+    assert len(feature_commit) == 64
+    assert feature_commit != main_commit
+
+    fs = FluxelFileSystem(dataset_roots={"demo": tmp_path})
+    main_listing = sorted(fs.ls("fluxel://demo@main/*", detail=False))
+    assert main_listing == [
+        "fluxel://demo@main/image0.jpg",
+        "fluxel://demo@main/image1.jpg",
+        "fluxel://demo@main/nested/photo0.jpg",
+        "fluxel://demo@main/nested/photo1.jpg",
+    ]
+
+    feature_listing = sorted(fs.ls("fluxel://demo@feature/*", detail=False))
+    assert feature_listing == [
+        "fluxel://demo@feature/image1.jpg",
+        "fluxel://demo@feature/nested/photo1.jpg",
+    ]
+
+    main_ref_path = tmp_path / ".fluxel" / "refs" / "heads" / "main"
+    main_ref_path.write_text(f"{feature_commit}\n", encoding="utf-8")
+
+    merged_main_listing = sorted(fs.ls("fluxel://demo@main/*", detail=False))
+    assert merged_main_listing == [
+        "fluxel://demo@main/image1.jpg",
+        "fluxel://demo@main/nested/photo1.jpg",
+    ]
+
+    assert run_cli(["diff", "--root", str(tmp_path), "main", "feature"]) == 0
+    diff_payload = json.loads(capsys.readouterr().out)
+    assert diff_payload == []
