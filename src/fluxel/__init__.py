@@ -2,6 +2,7 @@ from .cli import build_parser, main, run_cli
 from .core import (
     DEFAULT_CHUNK_SIZE,
     AnalyticalIndexPaths,
+    LocalClientState,
     CommitObject,
     DiffEntry,
     FluxelFileSystem,
@@ -46,6 +47,7 @@ from .core import (
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
     "AnalyticalIndexPaths",
+    "LocalClientState",
     "CommitObject",
     "DiffEntry",
     "FluxelFileSystem",

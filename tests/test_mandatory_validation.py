@@ -6,6 +6,7 @@ from pathlib import Path
 from fluxel.core import (
     FluxelFileSystem,
     FluxelRepository,
+    LocalClientState,
     LocalRepositoryStore,
     ManifestEntry,
     ManifestReader,
@@ -153,3 +154,78 @@ def test_repository_mutations_can_use_separate_local_store(tmp_path: Path) -> No
 
     manifest_entries = list(ManifestReader(manifest_paths[0]).iter_entries())
     assert [entry.path for entry in manifest_entries] == ["sample.txt"]
+
+
+def test_current_branch_preference_is_local_per_client(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    store_root = tmp_path / "repo-state"
+    client_a_root = tmp_path / "client-a"
+    client_b_root = tmp_path / "client-b"
+    dataset_root.mkdir(parents=True)
+    store_root.mkdir(parents=True)
+    client_a_root.mkdir(parents=True)
+    client_b_root.mkdir(parents=True)
+    (dataset_root / "shared.txt").write_text("base")
+
+    repo_a = FluxelRepository(
+        dataset_root,
+        store=LocalRepositoryStore(store_root),
+        client_state=LocalClientState(client_a_root),
+    )
+    repo_b = FluxelRepository(
+        dataset_root,
+        store=LocalRepositoryStore(store_root),
+        client_state=LocalClientState(client_b_root),
+    )
+
+    repo_a.commit("base")
+    repo_a.branch("feature")
+    repo_a.set_current_branch("feature")
+    repo_b.set_current_branch("main")
+
+    assert repo_a.current_branch() == "feature"
+    assert repo_b.current_branch() == "main"
+    assert (
+        client_a_root / ".fluxel" / "refs" / "HEAD"
+    ).read_text().strip() == "refs/heads/feature"
+    assert (
+        client_b_root / ".fluxel" / "refs" / "HEAD"
+    ).read_text().strip() == "refs/heads/main"
+    assert not (store_root / ".fluxel" / "refs" / "HEAD").exists()
+
+
+def test_staging_state_is_local_per_client(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    store_root = tmp_path / "repo-state"
+    client_a_root = tmp_path / "client-a"
+    client_b_root = tmp_path / "client-b"
+    dataset_root.mkdir(parents=True)
+    store_root.mkdir(parents=True)
+    client_a_root.mkdir(parents=True)
+    client_b_root.mkdir(parents=True)
+    (dataset_root / "shared.txt").write_text("base")
+    (dataset_root / "feature.txt").write_text("feature")
+
+    repo_a = FluxelRepository(
+        dataset_root,
+        store=LocalRepositoryStore(store_root),
+        client_state=LocalClientState(client_a_root),
+    )
+    repo_b = FluxelRepository(
+        dataset_root,
+        store=LocalRepositoryStore(store_root),
+        client_state=LocalClientState(client_b_root),
+    )
+
+    repo_a.commit("base")
+    repo_a.branch("feature")
+    repo_a.set_current_branch("feature")
+    repo_b.set_current_branch("feature")
+
+    repo_a.add(["feature.txt"])
+
+    assert repo_a.status().added == ["feature.txt"]
+    assert repo_b.status().added == []
+    assert (client_a_root / ".fluxel" / "staging" / "feature.json").exists()
+    assert not (client_b_root / ".fluxel" / "staging" / "feature.json").exists()
+    assert not (store_root / ".fluxel" / "staging" / "feature.json").exists()

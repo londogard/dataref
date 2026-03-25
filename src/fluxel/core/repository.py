@@ -8,23 +8,21 @@
 from __future__ import annotations
 
 import json
-from pathlib import PurePosixPath
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from pathlib import PurePosixPath
 from tempfile import NamedTemporaryFile
 from typing import Iterator, Literal
 
 from blake3 import blake3
 
+from .client_state import LocalClientState
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file
 from .layout import initialize_fluxel_layout
 from .manifest import ManifestEntry, ManifestWriter, walk_files
 from .repository_store import LocalRepositoryStore, RepositoryStore
 from .storage import iter_s3_objects, open_source_uri, parse_s3_uri
-
-
-HEAD_FILE = "HEAD"
 
 
 @dataclass(frozen=True)
@@ -97,17 +95,16 @@ class FluxelRepository:
         root: str | Path,
         *,
         store: RepositoryStore | None = None,
+        client_state: LocalClientState | None = None,
     ) -> None:
         self.layout = initialize_fluxel_layout(root)
         self.store = store or LocalRepositoryStore(self.layout.root)
+        self.client_state = client_state or LocalClientState(self.layout.root)
         self._ensure_head(default_branch="main")
 
     @property
     def root(self) -> Path:
         return self.layout.root
-
-    def _head_path(self) -> Path:
-        return self.layout.refs_dir / HEAD_FILE
 
     def _branch_path(self, branch_name: str) -> Path:
         if isinstance(self.store, LocalRepositoryStore):
@@ -115,20 +112,16 @@ class FluxelRepository:
         return self.layout.heads_dir / branch_name
 
     def _ensure_head(self, default_branch: str) -> None:
-        head_path = self._head_path()
-        if not head_path.exists():
-            head_path.write_text(f"refs/heads/{default_branch}\n", encoding="utf-8")
+        self.client_state.ensure_current_branch(default_branch)
         if self.store.read_branch_ref(default_branch) is None:
             self.store.write_branch_ref(default_branch, None)
 
-    def _read_head_ref(self) -> str:
-        content = self._head_path().read_text(encoding="utf-8").strip()
-        if not content.startswith("refs/heads/"):
-            raise ValueError("HEAD must be a symbolic ref under refs/heads/")
-        return content
-
     def current_branch(self) -> str:
-        return self._read_head_ref().split("refs/heads/", maxsplit=1)[1]
+        return self.client_state.current_branch()
+
+    def set_current_branch(self, branch: str) -> None:
+        self._ensure_branch_exists(branch)
+        self.client_state.set_current_branch(branch)
 
     def head_commit(self) -> str | None:
         branch_ref = self.store.read_branch_ref(self.current_branch())
@@ -668,9 +661,6 @@ class FluxelRepository:
             return len(path.parts) == 1 and path.match(pattern_suffix)
         return False
 
-    def _stage_path(self, branch: str) -> Path:
-        return self.layout.staging_dir / f"{branch}.json"
-
     def _normalize_stage_path(self, path: str) -> str:
         normalized = path.strip().strip("/")
         if not normalized:
@@ -680,10 +670,10 @@ class FluxelRepository:
         return normalized
 
     def _load_stage(self, branch: str) -> dict[str, StageChange]:
-        stage_path = self._stage_path(branch)
-        if not stage_path.exists():
+        stage_payload = self.client_state.read_staging_payload(branch)
+        if stage_payload is None:
             return {}
-        raw = json.loads(stage_path.read_text(encoding="utf-8"))
+        raw = json.loads(stage_payload)
         if not isinstance(raw, list):
             raise ValueError("Stage file must contain a list")
         staged: dict[str, StageChange] = {}
@@ -695,9 +685,8 @@ class FluxelRepository:
         return staged
 
     def _save_stage(self, branch: str, staged: dict[str, StageChange]) -> None:
-        stage_path = self._stage_path(branch)
         if not staged:
-            stage_path.unlink(missing_ok=True)
+            self.client_state.write_staging_payload(branch, None)
             return
         payload = [
             {
@@ -707,8 +696,10 @@ class FluxelRepository:
             }
             for change in sorted(staged.values(), key=lambda item: item.path)
         ]
-        stage_path.parent.mkdir(parents=True, exist_ok=True)
-        stage_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        self.client_state.write_staging_payload(
+            branch,
+            json.dumps(payload, indent=2) + "\n",
+        )
 
     def _ensure_branch_exists(self, branch: str) -> None:
         if self.store.read_branch_ref(branch) is None:

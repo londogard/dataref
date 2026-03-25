@@ -1,3 +1,4 @@
+from .client_state import LocalClientState
 from .filesystem import FluxelFileSystem, FluxelURI
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file, blake3_digest_stream
 from .index import (
@@ -52,6 +53,7 @@ from .storage import (
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
     "AnalyticalIndexPaths",
+    "LocalClientState",
     "CommitObject",
     "DiffEntry",
     "FluxelFileSystem",
