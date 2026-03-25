@@ -6,6 +6,7 @@ from pathlib import Path
 from fluxel.core import (
     FluxelFileSystem,
     FluxelRepository,
+    LocalRepositoryStore,
     ManifestEntry,
     ManifestReader,
     ManifestWriter,
@@ -122,3 +123,33 @@ def test_uri_routing_supports_metadata_identity_entries(tmp_path: Path) -> None:
     fs = FluxelFileSystem(dataset_roots={"meta_data": dataset_root})
     with fs.open("fluxel://meta_data@main/test.csv", "rb") as handle:
         assert handle.read() == b"value\n42\n"
+
+
+def test_repository_mutations_can_use_separate_local_store(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    store_root = tmp_path / "repo-state"
+    dataset_root.mkdir(parents=True)
+    store_root.mkdir(parents=True)
+    (dataset_root / "sample.txt").write_text("payload")
+
+    repo = FluxelRepository(
+        dataset_root,
+        store=LocalRepositoryStore(store_root),
+    )
+    commit_id = repo.commit("initial")
+
+    assert commit_id
+    assert list((dataset_root / ".fluxel" / "commits").glob("*.json")) == []
+    assert list((dataset_root / ".fluxel" / "manifests").glob("*.jsonl")) == []
+    assert not any((dataset_root / ".fluxel" / "blobs").rglob("*"))
+
+    assert list((store_root / ".fluxel" / "commits").glob("*.json"))
+    manifest_paths = list((store_root / ".fluxel" / "manifests").glob("*.jsonl"))
+    assert manifest_paths
+    assert any((store_root / ".fluxel" / "blobs").rglob("*"))
+    assert (
+        store_root / ".fluxel" / "refs" / "heads" / "main"
+    ).read_text().strip() == commit_id
+
+    manifest_entries = list(ManifestReader(manifest_paths[0]).iter_entries())
+    assert [entry.path for entry in manifest_entries] == ["sample.txt"]

@@ -14,6 +14,12 @@ from .manifest import (
     build_manifest_entries,
     walk_files,
 )
+from .repository_store import (
+    BranchRefState,
+    LocalRepositoryStore,
+    RepositoryStore,
+    S3RepositoryStore,
+)
 from .repository import (
     CommitObject,
     DiffEntry,
@@ -56,11 +62,15 @@ __all__ = [
     "VerifyResult",
     "FluxelURI",
     "FluxelLayout",
+    "BranchRefState",
+    "LocalRepositoryStore",
     "LocalStorageBackend",
     "ManifestEntry",
     "ManifestReader",
     "ManifestWriter",
     "OptimisticLockError",
+    "RepositoryStore",
+    "S3RepositoryStore",
     "S3StorageBackend",
     "StorageBackend",
     "blake3_digest_file",

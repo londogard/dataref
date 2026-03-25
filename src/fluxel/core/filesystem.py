@@ -15,7 +15,6 @@ from typing import BinaryIO, Iterator
 import fsspec
 from fsspec.spec import AbstractFileSystem
 
-from .layout import blob_relpath
 from .manifest import ManifestEntry
 from .repository import FluxelRepository
 from .storage import open_source_uri
@@ -60,8 +59,8 @@ class FluxelFileSystem(AbstractFileSystem):
             )
         resolved = self._resolve_entry(path)
         if resolved.entry.blob_hash:
-            blob_path = self._blob_path(resolved.root, resolved.entry.blob_hash)
-            return io.BytesIO(blob_path.read_bytes())
+            repo = FluxelRepository(resolved.root)
+            return io.BytesIO(repo.read_blob(resolved.entry.blob_hash))
         if resolved.entry.source_uri:
             return _SourceURIFile(open_source_uri(resolved.entry.source_uri))
         raise FileNotFoundError(
@@ -170,9 +169,6 @@ class FluxelFileSystem(AbstractFileSystem):
             logical_path=logical_path,
             include_staging=include_staging,
         )
-
-    def _blob_path(self, dataset_root: Path, content_hash: str) -> Path:
-        return dataset_root / ".fluxel" / "blobs" / blob_relpath(content_hash)
 
 
 @dataclass(frozen=True)

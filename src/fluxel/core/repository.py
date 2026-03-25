@@ -18,8 +18,9 @@ from typing import Iterator, Literal
 from blake3 import blake3
 
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file
-from .layout import blob_relpath, initialize_fluxel_layout
-from .manifest import ManifestEntry, ManifestReader, ManifestWriter, walk_files
+from .layout import initialize_fluxel_layout
+from .manifest import ManifestEntry, ManifestWriter, walk_files
+from .repository_store import LocalRepositoryStore, RepositoryStore
 from .storage import iter_s3_objects, open_source_uri, parse_s3_uri
 
 
@@ -91,8 +92,14 @@ class StageStatus:
 
 
 class FluxelRepository:
-    def __init__(self, root: str | Path) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        store: RepositoryStore | None = None,
+    ) -> None:
         self.layout = initialize_fluxel_layout(root)
+        self.store = store or LocalRepositoryStore(self.layout.root)
         self._ensure_head(default_branch="main")
 
     @property
@@ -103,16 +110,16 @@ class FluxelRepository:
         return self.layout.refs_dir / HEAD_FILE
 
     def _branch_path(self, branch_name: str) -> Path:
+        if isinstance(self.store, LocalRepositoryStore):
+            return self.store.branch_path(branch_name)
         return self.layout.heads_dir / branch_name
 
     def _ensure_head(self, default_branch: str) -> None:
         head_path = self._head_path()
         if not head_path.exists():
             head_path.write_text(f"refs/heads/{default_branch}\n", encoding="utf-8")
-        default_ref = self._branch_path(default_branch)
-        if not default_ref.exists():
-            default_ref.parent.mkdir(parents=True, exist_ok=True)
-            default_ref.write_text("", encoding="utf-8")
+        if self.store.read_branch_ref(default_branch) is None:
+            self.store.write_branch_ref(default_branch, None)
 
     def _read_head_ref(self) -> str:
         content = self._head_path().read_text(encoding="utf-8").strip()
@@ -124,34 +131,29 @@ class FluxelRepository:
         return self._read_head_ref().split("refs/heads/", maxsplit=1)[1]
 
     def head_commit(self) -> str | None:
-        branch_path = self.layout.fluxel_dir / self._read_head_ref()
-        if not branch_path.exists():
+        branch_ref = self.store.read_branch_ref(self.current_branch())
+        if branch_ref is None:
             return None
-        commit_id = branch_path.read_text(encoding="utf-8").strip()
-        return commit_id or None
+        return branch_ref.commit_id
 
     def resolve_ref(self, branch_or_commit: str) -> str:
-        maybe_branch = self._branch_path(branch_or_commit)
-        if maybe_branch.exists():
-            commit_id = maybe_branch.read_text(encoding="utf-8").strip()
-            if not commit_id:
+        branch_ref = self.store.read_branch_ref(branch_or_commit)
+        if branch_ref is not None:
+            if not branch_ref.commit_id:
                 raise ValueError(f"Branch has no commits: {branch_or_commit}")
-            return commit_id
-        commit_path = self.layout.commits_dir / f"{branch_or_commit}.json"
-        if commit_path.exists():
+            return branch_ref.commit_id
+        if self.store.object_exists("commit", branch_or_commit):
             return branch_or_commit
         raise ValueError(f"Unknown branch or commit: {branch_or_commit}")
 
     def branch(self, name: str) -> Path:
         if not name or "/" in name or name.startswith("."):
             raise ValueError("Invalid branch name")
-        target = self._branch_path(name)
-        if target.exists():
+        if self.store.read_branch_ref(name) is not None:
             raise ValueError(f"Branch already exists: {name}")
         head_commit = self.head_commit() or ""
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(f"{head_commit}\n" if head_commit else "", encoding="utf-8")
-        return target
+        self.store.write_branch_ref(name, head_commit or None)
+        return self._branch_path(name)
 
     def merge(self, source_ref: str, target_ref: str) -> MergeResult:
         if not source_ref:
@@ -178,7 +180,7 @@ class FluxelRepository:
                 f"Cannot fast-forward {target_ref} to {source_ref}: target is not an ancestor"
             )
 
-        self._branch_path(target_ref).write_text(f"{source_commit}\n", encoding="utf-8")
+        self.store.write_branch_ref(target_ref, source_commit)
         return MergeResult(
             source_ref=source_ref,
             target_ref=target_ref,
@@ -208,12 +210,7 @@ class FluxelRepository:
             self._materialize_blobs_and_entries(identity_mode=identity_mode)
         )
         manifest_hash = blake3_digest_file(temp_manifest)
-        manifest_target = self.layout.manifests_dir / f"{manifest_hash}.jsonl"
-        manifest_target.parent.mkdir(parents=True, exist_ok=True)
-        if not manifest_target.exists():
-            temp_manifest.replace(manifest_target)
-        else:
-            temp_manifest.unlink(missing_ok=True)
+        self._persist_manifest(temp_manifest, manifest_hash)
 
         parent_commit = self._branch_head_commit(branch)
         return self._write_commit_object(
@@ -247,12 +244,7 @@ class FluxelRepository:
             )
         )
         manifest_hash = blake3_digest_file(temp_manifest)
-        manifest_target = self.layout.manifests_dir / f"{manifest_hash}.jsonl"
-        manifest_target.parent.mkdir(parents=True, exist_ok=True)
-        if not manifest_target.exists():
-            temp_manifest.replace(manifest_target)
-        else:
-            temp_manifest.unlink(missing_ok=True)
+        self._persist_manifest(temp_manifest, manifest_hash)
 
         parent_commit = self._branch_head_commit(branch)
         return self._write_commit_object(
@@ -310,10 +302,10 @@ class FluxelRepository:
         return StageStatus(ref=branch, added=added, removed=removed)
 
     def read_commit(self, commit_id: str) -> CommitObject:
-        commit_path = self.layout.commits_dir / f"{commit_id}.json"
-        if not commit_path.exists():
+        commit_payload = self.store.read_commit_bytes(commit_id)
+        if commit_payload is None:
             raise ValueError(f"Unknown commit: {commit_id}")
-        data = json.loads(commit_path.read_text(encoding="utf-8"))
+        data = json.loads(commit_payload.decode("utf-8"))
         return CommitObject(
             id=str(data["id"]),
             message=str(data["message"]),
@@ -385,13 +377,11 @@ class FluxelRepository:
         *,
         dry_run: bool = False,
     ) -> VerifyResult:
-        branch_path = self._branch_path(ref)
-        if not branch_path.exists():
+        if self.store.read_branch_ref(ref) is None:
             raise ValueError("verify currently supports branch refs only")
 
         base_commit_id = self.resolve_ref(ref)
         base_commit = self.read_commit(base_commit_id)
-        manifest_path = self.layout.manifests_dir / f"{base_commit.manifest}.jsonl"
         normalized_prefixes = [
             prefix.strip("/") for prefix in (path_prefixes or []) if prefix.strip("/")
         ]
@@ -410,8 +400,7 @@ class FluxelRepository:
 
         def iter_verified_entries() -> Iterator[ManifestEntry]:
             nonlocal verified_entries, candidate_entries, total_entries
-            reader = ManifestReader(manifest_path)
-            for entry in reader.iter_entries():
+            for entry in self.store.iter_manifest_entries(base_commit.manifest):
                 total_entries += 1
                 if not should_verify(entry.path):
                     yield entry
@@ -453,12 +442,7 @@ class FluxelRepository:
             )
 
         manifest_hash = blake3_digest_file(temp_manifest)
-        manifest_target = self.layout.manifests_dir / f"{manifest_hash}.jsonl"
-        manifest_target.parent.mkdir(parents=True, exist_ok=True)
-        if not manifest_target.exists():
-            temp_manifest.replace(manifest_target)
-        else:
-            temp_manifest.unlink(missing_ok=True)
+        self._persist_manifest(temp_manifest, manifest_hash)
 
         commit_body = {
             "message": f"verify {ref}",
@@ -473,12 +457,13 @@ class FluxelRepository:
         commit_id = blake3(canonical).hexdigest()
         commit_object = CommitObject(id=commit_id, **commit_body)
 
-        commit_path = self.layout.commits_dir / f"{commit_id}.json"
-        commit_path.write_text(
-            json.dumps(asdict(commit_object), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        self.store.write_commit_bytes(
+            commit_id,
+            (json.dumps(asdict(commit_object), indent=2, sort_keys=True) + "\n").encode(
+                "utf-8"
+            ),
         )
-        self._branch_path(ref).write_text(f"{commit_id}\n", encoding="utf-8")
+        self.store.write_branch_ref(ref, commit_id)
         return VerifyResult(
             commit_id=commit_id,
             verified_entries=verified_entries,
@@ -489,9 +474,8 @@ class FluxelRepository:
         )
 
     def _manifest_index(self, manifest_hash: str) -> dict[str, ManifestEntry]:
-        manifest_path = self.layout.manifests_dir / f"{manifest_hash}.jsonl"
         index: dict[str, ManifestEntry] = {}
-        for entry in ManifestReader(manifest_path).iter_entries():
+        for entry in self.store.iter_manifest_entries(manifest_hash):
             index[entry.path] = entry
         return index
 
@@ -727,16 +711,14 @@ class FluxelRepository:
         stage_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     def _ensure_branch_exists(self, branch: str) -> None:
-        branch_path = self._branch_path(branch)
-        if not branch_path.exists():
+        if self.store.read_branch_ref(branch) is None:
             raise ValueError(f"Unknown branch: {branch}")
 
     def _branch_head_commit(self, branch: str) -> str | None:
-        branch_path = self._branch_path(branch)
-        if not branch_path.exists():
+        branch_ref = self.store.read_branch_ref(branch)
+        if branch_ref is None:
             return None
-        value = branch_path.read_text(encoding="utf-8").strip()
-        return value or None
+        return branch_ref.commit_id
 
     def _is_ancestor(self, *, ancestor_commit: str, descendant_commit: str) -> bool:
         current_commit: str | None = descendant_commit
@@ -766,12 +748,13 @@ class FluxelRepository:
         ).encode("utf-8")
         commit_id = blake3(canonical).hexdigest()
         commit_object = CommitObject(id=commit_id, **commit_body)
-        commit_path = self.layout.commits_dir / f"{commit_id}.json"
-        commit_path.write_text(
-            json.dumps(asdict(commit_object), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        self.store.write_commit_bytes(
+            commit_id,
+            (json.dumps(asdict(commit_object), indent=2, sort_keys=True) + "\n").encode(
+                "utf-8"
+            ),
         )
-        self._branch_path(branch).write_text(f"{commit_id}\n", encoding="utf-8")
+        self.store.write_branch_ref(branch, commit_id)
         return commit_id
 
     def _commit_staged(self, *, message: str, branch: str) -> str:
@@ -806,12 +789,7 @@ class FluxelRepository:
 
         temp_manifest = self._write_temp_manifest(iter_entries())
         manifest_hash = blake3_digest_file(temp_manifest)
-        manifest_target = self.layout.manifests_dir / f"{manifest_hash}.jsonl"
-        manifest_target.parent.mkdir(parents=True, exist_ok=True)
-        if not manifest_target.exists():
-            temp_manifest.replace(manifest_target)
-        else:
-            temp_manifest.unlink(missing_ok=True)
+        self._persist_manifest(temp_manifest, manifest_hash)
 
         commit_id = self._write_commit_object(
             branch=branch,
@@ -823,17 +801,7 @@ class FluxelRepository:
         return commit_id
 
     def _store_blob(self, source_file: Path, content_hash: str) -> None:
-        rel = blob_relpath(content_hash)
-        target = self.layout.blobs_dir / rel
-        if target.exists():
-            return
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with source_file.open("rb") as src, target.open("wb") as dst:
-            while True:
-                chunk = src.read(DEFAULT_CHUNK_SIZE)
-                if not chunk:
-                    break
-                dst.write(chunk)
+        self.store.write_blob_file(content_hash, source_file, if_missing=True)
 
     def _store_blob_from_source_uri(self, source_uri: str) -> str:
         with NamedTemporaryFile(mode="wb", delete=False) as temp:
@@ -847,13 +815,21 @@ class FluxelRepository:
                     hasher.update(chunk)
                     temp.write(chunk)
         digest = hasher.hexdigest()
-        target = self.layout.blobs_dir / blob_relpath(digest)
-        if target.exists():
+        if self.store.object_exists("blob", digest):
             temp_path.unlink(missing_ok=True)
             return digest
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temp_path.replace(target)
+        self.store.write_blob_file(digest, temp_path, if_missing=True)
+        temp_path.unlink(missing_ok=True)
         return digest
+
+    def read_blob(self, blob_hash: str) -> bytes:
+        return self.store.read_blob_bytes(blob_hash)
+
+    def _persist_manifest(self, temp_manifest: Path, manifest_hash: str) -> None:
+        if self.store.object_exists("manifest", manifest_hash):
+            temp_manifest.unlink(missing_ok=True)
+            return
+        self.store.write_manifest_file(manifest_hash, temp_manifest, if_missing=True)
 
     def _write_temp_manifest(self, entries: Iterator[ManifestEntry]) -> Path:
         with NamedTemporaryFile(
