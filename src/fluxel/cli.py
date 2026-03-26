@@ -11,6 +11,7 @@ from simple_parsing.helpers import field, flag, subparsers
 
 from .core import (
     FluxelRepository,
+    RefConflictError,
     add,
     build_analytical_index,
     commit,
@@ -225,25 +226,33 @@ def run_cli(argv: list[str] | None = None) -> int:
     command = args.command
 
     if isinstance(command, CommitArgs):
-        commit_id = commit(
-            Path(command.root),
-            command.message,
-            identity_mode=command.identity,
-            staged=command.staged,
-            ref=command.ref,
-        )
+        try:
+            commit_id = commit(
+                Path(command.root),
+                command.message,
+                identity_mode=command.identity,
+                staged=command.staged,
+                ref=command.ref,
+            )
+        except RefConflictError as error:
+            print(f"commit error: {error}", file=sys.stderr)
+            return 2
         print(commit_id)
         return 0
 
     if isinstance(command, ImportArgs):
-        commit_id = import_s3(
-            Path(command.root),
-            command.source,
-            command.message,
-            identity_mode=command.identity,
-            path_patterns=_flatten_option_values(command.path_patterns),
-            ref=command.ref,
-        )
+        try:
+            commit_id = import_s3(
+                Path(command.root),
+                command.source,
+                command.message,
+                identity_mode=command.identity,
+                path_patterns=_flatten_option_values(command.path_patterns),
+                ref=command.ref,
+            )
+        except RefConflictError as error:
+            print(f"commit error: {error}", file=sys.stderr)
+            return 2
         print(commit_id)
         return 0
 
@@ -305,7 +314,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 source_ref=command.source_ref,
                 target_ref=command.target_ref,
             )
-        except ValueError as error:
+        except (RefConflictError, ValueError) as error:
             print(f"merge error: {error}", file=sys.stderr)
             return 2
         print(
@@ -322,12 +331,16 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 0
 
     if isinstance(command, VerifyArgs):
-        result = verify(
-            root=Path(command.root),
-            ref=command.ref,
-            path_prefixes=_flatten_option_values(command.path),
-            dry_run=command.dry_run,
-        )
+        try:
+            result = verify(
+                root=Path(command.root),
+                ref=command.ref,
+                path_prefixes=_flatten_option_values(command.path),
+                dry_run=command.dry_run,
+            )
+        except RefConflictError as error:
+            print(f"verify error: {error}", file=sys.stderr)
+            return 2
         payload = {
             "commit_id": result.commit_id,
             "verified_entries": result.verified_entries,

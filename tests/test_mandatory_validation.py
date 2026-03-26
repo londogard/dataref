@@ -11,10 +11,35 @@ from fluxel.core import (
     ManifestEntry,
     ManifestReader,
     ManifestWriter,
+    RefConflictError,
     build_analytical_index,
     drop_analytical_index,
     query_analytical_index,
 )
+
+
+class ConflictOnceLocalRepositoryStore(LocalRepositoryStore):
+    def __init__(self, root: str | Path, *, conflict_commit_id: str) -> None:
+        super().__init__(root)
+        self.conflict_commit_id = conflict_commit_id
+        self.conflict_next_ref_update = False
+
+    def compare_and_set_branch_ref(
+        self,
+        branch: str,
+        commit_id: str | None,
+        *,
+        expected_version_token: str | None,
+    ) -> bool:
+        if self.conflict_next_ref_update:
+            self.conflict_next_ref_update = False
+            self.write_branch_ref(branch, self.conflict_commit_id)
+            return False
+        return super().compare_and_set_branch_ref(
+            branch,
+            commit_id,
+            expected_version_token=expected_version_token,
+        )
 
 
 def test_metadata_only_diff_does_not_read_blobs(tmp_path: Path, monkeypatch) -> None:
@@ -229,3 +254,59 @@ def test_staging_state_is_local_per_client(tmp_path: Path) -> None:
     assert (client_a_root / ".fluxel" / "staging" / "feature.json").exists()
     assert not (client_b_root / ".fluxel" / "staging" / "feature.json").exists()
     assert not (store_root / ".fluxel" / "staging" / "feature.json").exists()
+
+
+def test_commit_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
+    conflict_commit_id = "f" * 64
+    store = ConflictOnceLocalRepositoryStore(
+        tmp_path / "repo-state",
+        conflict_commit_id=conflict_commit_id,
+    )
+    (tmp_path / "data.txt").write_text("alpha")
+
+    repo = FluxelRepository(tmp_path, store=store)
+    base_commit = repo.commit("base")
+
+    (tmp_path / "data.txt").write_text("beta")
+    store.conflict_next_ref_update = True
+
+    try:
+        repo.commit("update")
+    except RefConflictError as error:
+        assert str(error) == (
+            f"Branch update conflict for 'main' during commit: expected {base_commit}, found {conflict_commit_id}"
+        )
+    else:
+        raise AssertionError("Expected RefConflictError")
+
+    assert store.read_branch_ref("main") is not None
+    assert store.read_branch_ref("main").commit_id == conflict_commit_id
+
+
+def test_merge_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
+    conflict_commit_id = "e" * 64
+    store = ConflictOnceLocalRepositoryStore(
+        tmp_path / "repo-state",
+        conflict_commit_id=conflict_commit_id,
+    )
+    (tmp_path / "shared.txt").write_text("base")
+
+    repo = FluxelRepository(tmp_path, store=store)
+    base_commit = repo.commit("base")
+    repo.branch("feature")
+
+    (tmp_path / "feature.txt").write_text("feature")
+    repo.add(["feature.txt"], ref="feature")
+    feature_commit = repo.commit("feature commit", staged=True, ref="feature")
+    assert feature_commit != base_commit
+
+    store.conflict_next_ref_update = True
+
+    try:
+        repo.merge("feature", "main")
+    except RefConflictError as error:
+        assert str(error) == (
+            f"Branch update conflict for 'main' during merge: expected {base_commit}, found {conflict_commit_id}"
+        )
+    else:
+        raise AssertionError("Expected RefConflictError")

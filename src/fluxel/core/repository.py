@@ -21,7 +21,7 @@ from .client_state import LocalClientState
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file
 from .layout import initialize_fluxel_layout
 from .manifest import ManifestEntry, ManifestWriter, walk_files
-from .repository_store import LocalRepositoryStore, RepositoryStore
+from .repository_store import BranchRefState, LocalRepositoryStore, RepositoryStore
 from .storage import iter_s3_objects, open_source_uri, parse_s3_uri
 
 
@@ -89,6 +89,26 @@ class StageStatus:
     removed: list[str]
 
 
+class RefConflictError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        branch: str,
+        operation: str,
+        expected_commit_id: str | None,
+        current_commit_id: str | None,
+    ) -> None:
+        expected = expected_commit_id or "<empty>"
+        current = current_commit_id or "<empty>"
+        super().__init__(
+            f"Branch update conflict for '{branch}' during {operation}: expected {expected}, found {current}"
+        )
+        self.branch = branch
+        self.operation = operation
+        self.expected_commit_id = expected_commit_id
+        self.current_commit_id = current_commit_id
+
+
 class FluxelRepository:
     def __init__(
         self,
@@ -145,7 +165,12 @@ class FluxelRepository:
         if self.store.read_branch_ref(name) is not None:
             raise ValueError(f"Branch already exists: {name}")
         head_commit = self.head_commit() or ""
-        self.store.write_branch_ref(name, head_commit or None)
+        if not self.store.compare_and_set_branch_ref(
+            name,
+            head_commit or None,
+            expected_version_token=None,
+        ):
+            raise ValueError(f"Branch already exists: {name}")
         return self._branch_path(name)
 
     def merge(self, source_ref: str, target_ref: str) -> MergeResult:
@@ -154,7 +179,7 @@ class FluxelRepository:
         if not target_ref:
             raise ValueError("Target ref cannot be empty")
 
-        self._ensure_branch_exists(target_ref)
+        target_branch_state = self._require_branch_state(target_ref)
         source_commit = self.resolve_ref(source_ref)
         target_commit = self.resolve_ref(target_ref)
 
@@ -173,7 +198,13 @@ class FluxelRepository:
                 f"Cannot fast-forward {target_ref} to {source_ref}: target is not an ancestor"
             )
 
-        self.store.write_branch_ref(target_ref, source_commit)
+        self._update_branch_ref(
+            branch=target_ref,
+            commit_id=source_commit,
+            expected_version_token=target_branch_state.version_token,
+            expected_commit_id=target_branch_state.commit_id,
+            operation="merge",
+        )
         return MergeResult(
             source_ref=source_ref,
             target_ref=target_ref,
@@ -194,10 +225,13 @@ class FluxelRepository:
         if identity_mode not in {"blake3", "meta"}:
             raise ValueError("identity_mode must be one of: blake3, meta")
         branch = ref or self.current_branch()
-        self._ensure_branch_exists(branch)
+        branch_state = self._require_branch_state(branch)
 
         if staged:
-            return self._commit_staged(message=message, branch=branch)
+            return self._commit_staged(
+                message=message,
+                branch_state=branch_state,
+            )
 
         temp_manifest = self._write_temp_manifest(
             self._materialize_blobs_and_entries(identity_mode=identity_mode)
@@ -205,12 +239,14 @@ class FluxelRepository:
         manifest_hash = blake3_digest_file(temp_manifest)
         self._persist_manifest(temp_manifest, manifest_hash)
 
-        parent_commit = self._branch_head_commit(branch)
+        parent_commit = branch_state.commit_id
         return self._write_commit_object(
             branch=branch,
             message=message,
             parent_commit=parent_commit,
             manifest_hash=manifest_hash,
+            expected_version_token=branch_state.version_token,
+            operation="commit",
         )
 
     def import_s3(
@@ -227,7 +263,7 @@ class FluxelRepository:
         if identity_mode not in {"blake3", "meta"}:
             raise ValueError("identity_mode must be one of: blake3, meta")
         branch = ref or self.current_branch()
-        self._ensure_branch_exists(branch)
+        branch_state = self._require_branch_state(branch)
 
         temp_manifest = self._write_temp_manifest(
             self._materialize_s3_entries(
@@ -239,12 +275,14 @@ class FluxelRepository:
         manifest_hash = blake3_digest_file(temp_manifest)
         self._persist_manifest(temp_manifest, manifest_hash)
 
-        parent_commit = self._branch_head_commit(branch)
+        parent_commit = branch_state.commit_id
         return self._write_commit_object(
             branch=branch,
             message=message,
             parent_commit=parent_commit,
             manifest_hash=manifest_hash,
+            expected_version_token=branch_state.version_token,
+            operation="commit",
         )
 
     def add(
@@ -370,8 +408,7 @@ class FluxelRepository:
         *,
         dry_run: bool = False,
     ) -> VerifyResult:
-        if self.store.read_branch_ref(ref) is None:
-            raise ValueError("verify currently supports branch refs only")
+        branch_state = self._require_branch_state(ref)
 
         base_commit_id = self.resolve_ref(ref)
         base_commit = self.read_commit(base_commit_id)
@@ -456,7 +493,13 @@ class FluxelRepository:
                 "utf-8"
             ),
         )
-        self.store.write_branch_ref(ref, commit_id)
+        self._update_branch_ref(
+            branch=ref,
+            commit_id=commit_id,
+            expected_version_token=branch_state.version_token,
+            expected_commit_id=branch_state.commit_id,
+            operation="verify",
+        )
         return VerifyResult(
             commit_id=commit_id,
             verified_entries=verified_entries,
@@ -702,8 +745,13 @@ class FluxelRepository:
         )
 
     def _ensure_branch_exists(self, branch: str) -> None:
-        if self.store.read_branch_ref(branch) is None:
+        self._require_branch_state(branch)
+
+    def _require_branch_state(self, branch: str) -> BranchRefState:
+        branch_state = self.store.read_branch_ref(branch)
+        if branch_state is None:
             raise ValueError(f"Unknown branch: {branch}")
+        return branch_state
 
     def _branch_head_commit(self, branch: str) -> str | None:
         branch_ref = self.store.read_branch_ref(branch)
@@ -726,6 +774,8 @@ class FluxelRepository:
         message: str,
         parent_commit: str | None,
         manifest_hash: str,
+        expected_version_token: str | None,
+        operation: str,
     ) -> str:
         commit_body = {
             "message": message,
@@ -745,15 +795,21 @@ class FluxelRepository:
                 "utf-8"
             ),
         )
-        self.store.write_branch_ref(branch, commit_id)
+        self._update_branch_ref(
+            branch=branch,
+            commit_id=commit_id,
+            expected_version_token=expected_version_token,
+            expected_commit_id=parent_commit,
+            operation=operation,
+        )
         return commit_id
 
-    def _commit_staged(self, *, message: str, branch: str) -> str:
-        staged = self._load_stage(branch)
+    def _commit_staged(self, *, message: str, branch_state: BranchRefState) -> str:
+        staged = self._load_stage(branch_state.branch)
         if not staged:
-            raise ValueError(f"No staged changes for branch: {branch}")
+            raise ValueError(f"No staged changes for branch: {branch_state.branch}")
 
-        parent_commit = self._branch_head_commit(branch)
+        parent_commit = branch_state.commit_id
         index: dict[str, ManifestEntry]
         if parent_commit:
             parent = self.read_commit(parent_commit)
@@ -783,12 +839,14 @@ class FluxelRepository:
         self._persist_manifest(temp_manifest, manifest_hash)
 
         commit_id = self._write_commit_object(
-            branch=branch,
+            branch=branch_state.branch,
             message=message,
             parent_commit=parent_commit,
             manifest_hash=manifest_hash,
+            expected_version_token=branch_state.version_token,
+            operation="commit",
         )
-        self._save_stage(branch, {})
+        self._save_stage(branch_state.branch, {})
         return commit_id
 
     def _store_blob(self, source_file: Path, content_hash: str) -> None:
@@ -821,6 +879,30 @@ class FluxelRepository:
             temp_manifest.unlink(missing_ok=True)
             return
         self.store.write_manifest_file(manifest_hash, temp_manifest, if_missing=True)
+
+    def _update_branch_ref(
+        self,
+        *,
+        branch: str,
+        commit_id: str | None,
+        expected_version_token: str | None,
+        expected_commit_id: str | None,
+        operation: str,
+    ) -> None:
+        updated = self.store.compare_and_set_branch_ref(
+            branch,
+            commit_id,
+            expected_version_token=expected_version_token,
+        )
+        if updated:
+            return
+        current_state = self.store.read_branch_ref(branch)
+        raise RefConflictError(
+            branch=branch,
+            operation=operation,
+            expected_commit_id=expected_commit_id,
+            current_commit_id=current_state.commit_id if current_state else None,
+        )
 
     def _write_temp_manifest(self, entries: Iterator[ManifestEntry]) -> Path:
         with NamedTemporaryFile(

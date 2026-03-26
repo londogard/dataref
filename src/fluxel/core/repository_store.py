@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 from typing import BinaryIO, Iterator, Literal, Protocol
 
 import boto3
@@ -305,12 +306,18 @@ class S3RepositoryStore:
         *,
         expected_version_token: str | None,
     ) -> bool:
-        current = self.read_branch_ref(branch)
-        current_version = current.version_token if current else None
-        if current_version != expected_version_token:
+        lock_token = str(uuid4())
+        if not self._acquire_branch_lock(branch, lock_token):
             return False
-        self.write_branch_ref(branch, commit_id)
-        return True
+        try:
+            current = self.read_branch_ref(branch)
+            current_version = current.version_token if current else None
+            if current_version != expected_version_token:
+                return False
+            self.write_branch_ref(branch, commit_id)
+            return True
+        finally:
+            self._release_branch_lock(branch, lock_token)
 
     def read_blob_bytes(self, blob_hash: str) -> bytes:
         response = self.client.get_object(
@@ -369,6 +376,44 @@ class S3RepositoryStore:
         if kind == "manifest":
             return f"manifests/{object_id}.jsonl"
         return f"refs/heads/{object_id}"
+
+    def _lock_key(self, branch: str) -> str:
+        suffix = f"locks/refs/heads/{branch}.lock"
+        if self.prefix:
+            return f"{self.prefix}/{suffix}"
+        return suffix
+
+    def _acquire_branch_lock(self, branch: str, token: str) -> bool:
+        try:
+            self.client.put_object(
+                Bucket=self.bucket,
+                Key=self._lock_key(branch),
+                Body=token.encode("utf-8"),
+                IfNoneMatch="*",
+            )
+        except ClientError as error:
+            if self._precondition_failed(error):
+                return False
+            raise
+        return True
+
+    def _release_branch_lock(self, branch: str, token: str) -> None:
+        try:
+            response = self.client.get_object(
+                Bucket=self.bucket, Key=self._lock_key(branch)
+            )
+        except ClientError as error:
+            if self._missing(error):
+                return
+            raise
+        body = response["Body"]
+        try:
+            current_token = body.read().decode("utf-8")
+        finally:
+            body.close()
+        if current_token != token:
+            return
+        self.client.delete_object(Bucket=self.bucket, Key=self._lock_key(branch))
 
     def _put_stream(
         self,
