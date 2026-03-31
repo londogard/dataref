@@ -32,6 +32,7 @@ Fluxel is intentionally in MVP mode.
 ### Implemented
 
 - Commit snapshots over a dataset root (`fluxel commit`).
+- Repository URI support via `--repo <path|s3://bucket/prefix>` and `open_repository(...)`.
 - Streaming S3 imports (`fluxel import`) with `blake3` or metadata identity modes.
 - Branch-scoped staging workflow (`fluxel add`, `fluxel rm`, `fluxel status`, `fluxel commit --staged`).
 - Commit identity modes: `blake3` (default) and `meta` (`hash(path+size)`).
@@ -45,10 +46,10 @@ Fluxel is intentionally in MVP mode.
 
 ### Not Fully Wired Yet
 
-- Repository commands still use local-path flow as primary execution path.
 - No remote sync CLI (`push/pull/fetch`) yet.
 - No `log/status/list/checkout` CLI surface yet.
 - No `s5cmd` command-list generation path for bulk transfer yet.
+- S3 branch locking still has no stale-lock recovery if a client dies mid-update; orphaned lock objects currently require manual cleanup.
 
 ## Technical Stack
 
@@ -71,34 +72,40 @@ uv run fluxel --help
 mkdir -p /tmp/fluxel-demo
 echo "hello" > /tmp/fluxel-demo/a.txt
 
-uv run fluxel commit --root /tmp/fluxel-demo -m "initial"
-uv run fluxel commit --root /tmp/fluxel-demo -m "fast metadata snapshot" --identity meta
-uv run fluxel import --root /tmp/fluxel-demo s3://my-bucket/bootstrap -m "bootstrap import"
-uv run fluxel import --root /tmp/fluxel-demo s3://my-bucket/bootstrap -m "metadata import" --identity meta
-uv run fluxel import --root /tmp/fluxel-demo s3://my-bucket/bootstrap -m "jpg subset" --path "**/*.jpg" --path root.csv
-uv run fluxel verify --root /tmp/fluxel-demo --ref main
+uv run fluxel --repo /tmp/fluxel-demo commit -m "initial"
+uv run fluxel --repo /tmp/fluxel-demo commit -m "fast metadata snapshot" --identity meta
+uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/bootstrap -m "bootstrap import"
+uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/bootstrap -m "metadata import" --identity meta
+uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/bootstrap -m "jpg subset" --path "**/*.jpg" --path root.csv
+uv run fluxel --repo /tmp/fluxel-demo verify --ref main
 
 # branch-scoped staged flow
-uv run fluxel branch --root /tmp/fluxel-demo feature
-uv run fluxel add --root /tmp/fluxel-demo --ref feature data/new.csv
-uv run fluxel status --root /tmp/fluxel-demo --ref feature
-uv run fluxel commit --root /tmp/fluxel-demo --ref feature --staged -m "feature updates"
-uv run fluxel merge --root /tmp/fluxel-demo feature main
+uv run fluxel --repo /tmp/fluxel-demo branch feature
+uv run fluxel --repo /tmp/fluxel-demo add --ref feature data/new.csv
+uv run fluxel --repo /tmp/fluxel-demo status --ref feature
+uv run fluxel --repo /tmp/fluxel-demo commit --ref feature --staged -m "feature updates"
+uv run fluxel --repo /tmp/fluxel-demo merge feature main
 
 echo "hello v2" > /tmp/fluxel-demo/a.txt
-uv run fluxel commit --root /tmp/fluxel-demo -m "update"
+uv run fluxel --repo /tmp/fluxel-demo commit -m "update"
 
-uv run fluxel branch --root /tmp/fluxel-demo experiment
-uv run fluxel diff --root /tmp/fluxel-demo <from_ref> <to_ref>
+uv run fluxel --repo /tmp/fluxel-demo branch experiment
+uv run fluxel --repo /tmp/fluxel-demo diff <from_ref> <to_ref>
+
+# remote repo metadata operations from the current working tree
+uv run fluxel --repo s3://my-bucket/datasets/demo branch feature
+uv run fluxel --repo s3://my-bucket/datasets/demo commit -m "snapshot current working tree"
 ```
 
 ## Analytical Index (Derived, Disposable)
 
 ```bash
-uv run fluxel index build --root /tmp/fluxel-demo --ref main --parquet
+uv run fluxel --repo /tmp/fluxel-demo index build --ref main --parquet
 uv run fluxel index query --db /path/to/<commit>.duckdb --sql "SELECT COUNT(*) FROM files"
 uv run fluxel index drop --db /path/to/<commit>.duckdb
 ```
+
+`--root` remains accepted as a compatibility alias for `--repo`.
 
 If the index is deleted, Fluxel remains fully functional from manifests and commits.
 

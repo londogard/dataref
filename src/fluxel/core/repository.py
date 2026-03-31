@@ -21,7 +21,12 @@ from .client_state import LocalClientState
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file
 from .layout import initialize_fluxel_layout
 from .manifest import ManifestEntry, ManifestWriter, walk_files
-from .repository_store import BranchRefState, LocalRepositoryStore, RepositoryStore
+from .repository_store import (
+    BranchRefState,
+    LocalRepositoryStore,
+    RepositoryStore,
+    S3RepositoryStore,
+)
 from .storage import iter_s3_objects, open_source_uri, parse_s3_uri
 
 
@@ -914,6 +919,42 @@ class FluxelRepository:
         return temp_path
 
 
+def _default_remote_client_root(worktree_root: Path, repo_uri: str) -> Path:
+    repo_id = blake3(repo_uri.encode("utf-8")).hexdigest()[:16]
+    return worktree_root / ".fluxel" / "clients" / repo_id
+
+
+def open_repository(
+    root: str | Path,
+    *,
+    worktree: str | Path | None = None,
+    client_root: str | Path | None = None,
+    s3_client: object | None = None,
+) -> FluxelRepository:
+    if isinstance(root, str) and root.startswith("s3://"):
+        bucket, prefix = parse_s3_uri(root)
+        worktree_root = Path(worktree or ".").resolve()
+        resolved_client_root = (
+            Path(client_root).resolve()
+            if client_root
+            else _default_remote_client_root(worktree_root, root)
+        )
+        return FluxelRepository(
+            worktree_root,
+            store=S3RepositoryStore(bucket, prefix, client=s3_client),
+            client_state=LocalClientState(resolved_client_root),
+        )
+
+    repo_root = Path(root).resolve()
+    worktree_root = Path(worktree).resolve() if worktree else repo_root
+    resolved_client_root = Path(client_root).resolve() if client_root else repo_root
+    return FluxelRepository(
+        worktree_root,
+        store=LocalRepositoryStore(repo_root),
+        client_state=LocalClientState(resolved_client_root),
+    )
+
+
 def commit(
     root: str | Path,
     message: str,
@@ -922,7 +963,7 @@ def commit(
     staged: bool = False,
     ref: str | None = None,
 ) -> str:
-    return FluxelRepository(root).commit(
+    return open_repository(root).commit(
         message,
         identity_mode=identity_mode,
         staged=staged,
@@ -939,7 +980,7 @@ def import_s3(
     path_patterns: list[str] | None = None,
     ref: str | None = None,
 ) -> str:
-    return FluxelRepository(root).import_s3(
+    return open_repository(root).import_s3(
         source_uri,
         message,
         identity_mode=identity_mode,
@@ -949,11 +990,11 @@ def import_s3(
 
 
 def branch(root: str | Path, name: str) -> Path:
-    return FluxelRepository(root).branch(name)
+    return open_repository(root).branch(name)
 
 
 def merge(root: str | Path, source_ref: str, target_ref: str) -> MergeResult:
-    return FluxelRepository(root).merge(source_ref, target_ref)
+    return open_repository(root).merge(source_ref, target_ref)
 
 
 def add(
@@ -963,19 +1004,19 @@ def add(
     ref: str | None = None,
     identity_mode: str = "blake3",
 ) -> StageStatus:
-    return FluxelRepository(root).add(paths, ref=ref, identity_mode=identity_mode)
+    return open_repository(root).add(paths, ref=ref, identity_mode=identity_mode)
 
 
 def rm(root: str | Path, paths: list[str], *, ref: str | None = None) -> StageStatus:
-    return FluxelRepository(root).rm(paths, ref=ref)
+    return open_repository(root).rm(paths, ref=ref)
 
 
 def status(root: str | Path, *, ref: str | None = None) -> StageStatus:
-    return FluxelRepository(root).status(ref=ref)
+    return open_repository(root).status(ref=ref)
 
 
 def diff(root: str | Path, from_ref: str, to_ref: str) -> list[DiffEntry]:
-    return FluxelRepository(root).diff(from_ref=from_ref, to_ref=to_ref)
+    return open_repository(root).diff(from_ref=from_ref, to_ref=to_ref)
 
 
 def verify(
@@ -985,6 +1026,6 @@ def verify(
     *,
     dry_run: bool = False,
 ) -> VerifyResult:
-    return FluxelRepository(root).verify(
+    return open_repository(root).verify(
         ref=ref, path_prefixes=path_prefixes, dry_run=dry_run
     )

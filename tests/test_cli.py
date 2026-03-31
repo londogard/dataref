@@ -5,6 +5,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from botocore.exceptions import ClientError
+
 from fluxel.core import FluxelFileSystem
 from fluxel import run_cli
 from fluxel.core import ManifestReader
@@ -16,6 +18,9 @@ class FakeStreamingBody:
 
     def read(self, size: int = -1) -> bytes:
         return self._buffer.read(size)
+
+    def iter_lines(self) -> list[bytes]:
+        return self._buffer.getvalue().splitlines()
 
     def close(self) -> None:
         self._buffer.close()
@@ -50,21 +55,119 @@ class FakeS3Client:
 
     def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
         assert Bucket == "demo-bucket"
-        metadata = self._objects[Key]
-        return {"Body": FakeStreamingBody(metadata["Body"])}
+        metadata = self._objects.get(Key)
+        if metadata is None:
+            raise self._client_error("NoSuchKey")
+        return {
+            "Body": FakeStreamingBody(metadata["Body"]),
+            "ETag": metadata["ETag"],
+        }
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: object,
+        IfNoneMatch: str | None = None,
+    ) -> dict[str, object]:
+        assert Bucket == "demo-bucket"
+        if IfNoneMatch == "*" and Key in self._objects:
+            raise self._client_error("PreconditionFailed")
+
+        payload = Body.read() if hasattr(Body, "read") else Body
+        if not isinstance(payload, bytes):
+            payload = bytes(payload)
+        self._objects[Key] = {
+            "Body": payload,
+            "LastModified": datetime.now(timezone.utc),
+            "ETag": self._etag(payload),
+        }
+        return {"ETag": self._objects[Key]["ETag"]}
+
+    def head_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+        assert Bucket == "demo-bucket"
+        metadata = self._objects.get(Key)
+        if metadata is None:
+            raise self._client_error("404")
+        return {"ETag": metadata["ETag"]}
+
+    def delete_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+        assert Bucket == "demo-bucket"
+        self._objects.pop(Key, None)
+        return {}
+
+    def _etag(self, payload: bytes) -> str:
+        return f'"{len(payload):x}-{sum(payload):x}"'
+
+    def _client_error(self, code: str) -> ClientError:
+        return ClientError({"Error": {"Code": code, "Message": code}}, "fake_s3")
 
 
-def install_fake_s3(monkeypatch, objects: dict[str, bytes]) -> None:
+def install_fake_s3(monkeypatch, objects: dict[str, bytes]) -> FakeS3Client:
     client = FakeS3Client(
         {
             key: {
                 "Body": payload,
                 "LastModified": datetime(2026, 1, 2, tzinfo=timezone.utc),
+                "ETag": f'"{len(payload):x}-{sum(payload):x}"',
             }
             for key, payload in objects.items()
         }
     )
     monkeypatch.setattr("fluxel.core.storage.boto3.client", lambda service_name: client)
+    monkeypatch.setattr(
+        "fluxel.core.repository_store.boto3.client",
+        lambda service_name: client,
+    )
+    return client
+
+
+def test_cli_supports_global_repo_flag_for_s3_repositories(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    client = install_fake_s3(monkeypatch, {})
+    monkeypatch.chdir(tmp_path)
+    repo_uri = "s3://demo-bucket/repos/demo"
+
+    (tmp_path / "a.txt").write_text("one")
+    assert run_cli(["--repo", repo_uri, "commit", "-m", "initial"]) == 0
+    commit_a = capsys.readouterr().out.strip()
+    assert len(commit_a) == 64
+
+    assert run_cli(["--repo", repo_uri, "branch", "feature"]) == 0
+    branch_out = capsys.readouterr().out.strip()
+    assert branch_out.endswith("/.fluxel/refs/heads/feature")
+
+    (tmp_path / "a.txt").write_text("two")
+    assert run_cli(["--repo", repo_uri, "commit", "-m", "update"]) == 0
+    commit_b = capsys.readouterr().out.strip()
+    assert len(commit_b) == 64
+    assert commit_a != commit_b
+
+    assert run_cli(["--repo", repo_uri, "diff", commit_a, commit_b]) == 0
+    diff_payload = json.loads(capsys.readouterr().out)
+    assert [entry["path"] for entry in diff_payload] == ["a.txt"]
+    assert diff_payload[0]["change"] == "modified"
+
+    assert run_cli(["--repo", repo_uri, "index", "build"]) == 0
+    build_payload = json.loads(capsys.readouterr().out)
+    db_path = Path(build_payload["database_path"])
+    assert db_path.exists()
+    assert "clients" in db_path.as_posix()
+
+    assert (
+        run_cli(
+            ["index", "query", "--db", str(db_path), "--sql", "SELECT path FROM files"]
+        )
+        == 0
+    )
+    query_payload = json.loads(capsys.readouterr().out)
+    assert query_payload == [["a.txt"]]
+
+    assert not list((tmp_path / ".fluxel" / "commits").glob("*.json"))
+    assert f"repos/demo/commits/{commit_b}.json" in client._objects
+    assert "repos/demo/refs/heads/main" in client._objects
 
 
 def test_cli_commit_branch_and_diff(tmp_path: Path, capsys) -> None:

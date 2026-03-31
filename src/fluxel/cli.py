@@ -3,18 +3,18 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 from simple_parsing import ArgumentParser
 from simple_parsing.helpers import field, flag, subparsers
 
 from .core import (
-    FluxelRepository,
     RefConflictError,
     add,
+    branch,
     build_analytical_index,
     commit,
+    diff,
     drop_analytical_index,
     import_s3,
     merge,
@@ -34,7 +34,11 @@ class CommitArgs:
     identity: IdentityMode = (
         "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
     )
-    root: str = "."  # "Dataset root path"
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
     staged: bool = flag(
         False,
         help="Commit only staged changes for a branch",
@@ -57,7 +61,11 @@ class ImportArgs:
         action="append",
         help="Optional relative path/glob filter (repeatable)",
     )
-    root: str = "."  # Dataset root path
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
     ref: str | None = None  # Branch ref to update (defaults to current branch)
 
 
@@ -65,7 +73,11 @@ class ImportArgs:
 class AddArgs:
     paths: list[str] = field(positional=True, nargs="+", help="Paths to stage")
     identity: IdentityMode = "blake3"  # Identity strategy for staged additions
-    root: str = field(default=".", help="Dataset root path")
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
     ref: str | None = field(
         default=None,
         help="Branch ref for staging (defaults to current branch)",
@@ -75,7 +87,11 @@ class AddArgs:
 @dataclass
 class RmArgs:
     paths: list[str] = field(positional=True, nargs="+", help="Paths to remove")
-    root: str = field(default=".", help="Dataset root path")
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
     ref: str | None = field(
         default=None,
         help="Branch ref for staging (defaults to current branch)",
@@ -84,7 +100,11 @@ class RmArgs:
 
 @dataclass
 class StatusArgs:
-    root: str = field(default=".", help="Dataset root path")
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
     ref: str | None = field(
         default=None,
         help="Branch ref for staging (defaults to current branch)",
@@ -94,26 +114,42 @@ class StatusArgs:
 @dataclass
 class BranchArgs:
     name: str = field(positional=True, help="Branch name")
-    root: str = field(default=".", help="Dataset root path")
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
 
 
 @dataclass
 class DiffArgs:
     from_ref: str = field(positional=True, help="Source ref (branch or commit)")
     to_ref: str = field(positional=True, help="Target ref (branch or commit)")
-    root: str = "."  # Dataset root path
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
 
 
 @dataclass
 class MergeArgs:
     source_ref: str = field(positional=True, help="Ref to merge from")
     target_ref: str = field(positional=True, help="Branch ref to fast-forward")
-    root: str = "."  # Dataset root path
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
 
 
 @dataclass
 class VerifyArgs:
-    root: str = "."  # Dataset root path
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
     ref: str = "main"  # Branch ref to verify
     path: list[str] = field(
         default_factory=list,
@@ -130,7 +166,11 @@ class VerifyArgs:
 
 @dataclass
 class IndexBuildArgs:
-    root: str = "."  # Dataset root path
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
     ref: str = "main"  # Ref to index
     output_dir: str | None = field(
         default=None,
@@ -220,7 +260,28 @@ def _flatten_option_values(values: list[object]) -> list[str]:
     return flattened
 
 
+def _normalize_global_repo_option(argv: list[str]) -> list[str]:
+    if not argv:
+        return argv
+
+    tokens = list(argv)
+    if tokens[0] not in {"--repo", "--root"}:
+        return tokens
+    if len(tokens) < 3:
+        return tokens
+
+    repo_flag = tokens[0]
+    repo_value = tokens[1]
+    command = tokens[2]
+
+    if command == "index" and len(tokens) >= 4 and tokens[3] == "build":
+        return ["index", "build", repo_flag, repo_value, *tokens[4:]]
+
+    return [command, repo_flag, repo_value, *tokens[3:]]
+
+
 def run_cli(argv: list[str] | None = None) -> int:
+    argv = _normalize_global_repo_option(argv or sys.argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv).cli
     command = args.command
@@ -228,7 +289,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     if isinstance(command, CommitArgs):
         try:
             commit_id = commit(
-                Path(command.root),
+                command.root,
                 command.message,
                 identity_mode=command.identity,
                 staged=command.staged,
@@ -243,7 +304,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     if isinstance(command, ImportArgs):
         try:
             commit_id = import_s3(
-                Path(command.root),
+                command.root,
                 command.source,
                 command.message,
                 identity_mode=command.identity,
@@ -258,7 +319,7 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if isinstance(command, AddArgs):
         stage = add(
-            root=Path(command.root),
+            root=command.root,
             paths=command.paths,
             ref=command.ref,
             identity_mode=command.identity,
@@ -268,7 +329,7 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if isinstance(command, RmArgs):
         stage = rm(
-            root=Path(command.root),
+            root=command.root,
             paths=command.paths,
             ref=command.ref,
         )
@@ -277,19 +338,20 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if isinstance(command, StatusArgs):
         stage = status(
-            root=Path(command.root),
+            root=command.root,
             ref=command.ref,
         )
         print(json.dumps(_stage_payload(stage), indent=2))
         return 0
 
     if isinstance(command, BranchArgs):
-        branch_path = FluxelRepository(Path(command.root)).branch(command.name)
+        branch_path = branch(command.root, command.name)
         print(str(branch_path))
         return 0
 
     if isinstance(command, DiffArgs):
-        changes = FluxelRepository(Path(command.root)).diff(
+        changes = diff(
+            command.root,
             command.from_ref,
             command.to_ref,
         )
@@ -310,7 +372,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     if isinstance(command, MergeArgs):
         try:
             result = merge(
-                root=Path(command.root),
+                root=command.root,
                 source_ref=command.source_ref,
                 target_ref=command.target_ref,
             )
@@ -333,7 +395,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     if isinstance(command, VerifyArgs):
         try:
             result = verify(
-                root=Path(command.root),
+                root=command.root,
                 ref=command.ref,
                 path_prefixes=_flatten_option_values(command.path),
                 dry_run=command.dry_run,
@@ -356,7 +418,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         index_command = command.command
         if isinstance(index_command, IndexBuildArgs):
             paths = build_analytical_index(
-                root=Path(index_command.root),
+                root=index_command.root,
                 ref=index_command.ref,
                 output_dir=index_command.output_dir,
                 export_parquet=index_command.parquet,

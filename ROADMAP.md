@@ -129,6 +129,10 @@ Deliverables:
 - compare-and-set branch updates in the repository store
 - conflict errors surfaced clearly from commit and merge flows
 
+Unimplemented note:
+
+- stale-lock recovery is still missing if a client dies mid-update and leaves behind a branch lock object
+
 Acceptance criteria:
 
 - Concurrent updates do not silently overwrite each other.
