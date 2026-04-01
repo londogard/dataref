@@ -1,133 +1,19 @@
 from __future__ import annotations
 
-import io
 import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-
-from botocore.exceptions import ClientError
 
 from fluxel.core import FluxelFileSystem
 from fluxel import run_cli
 from fluxel.core import ManifestReader
 
 
-class FakeStreamingBody:
-    def __init__(self, payload: bytes) -> None:
-        self._buffer = io.BytesIO(payload)
-
-    def read(self, size: int = -1) -> bytes:
-        return self._buffer.read(size)
-
-    def iter_lines(self) -> list[bytes]:
-        return self._buffer.getvalue().splitlines()
-
-    def close(self) -> None:
-        self._buffer.close()
-
-
-class FakeS3Paginator:
-    def __init__(self, objects: dict[str, dict[str, object]]) -> None:
-        self._objects = objects
-
-    def paginate(self, *, Bucket: str, Prefix: str) -> list[dict[str, object]]:
-        contents = []
-        for key, metadata in sorted(self._objects.items()):
-            if not key.startswith(Prefix):
-                continue
-            contents.append(
-                {
-                    "Key": key,
-                    "Size": len(metadata["Body"]),
-                    "LastModified": metadata["LastModified"],
-                }
-            )
-        return [{"Contents": contents}]
-
-
-class FakeS3Client:
-    def __init__(self, objects: dict[str, dict[str, object]]) -> None:
-        self._objects = objects
-
-    def get_paginator(self, operation_name: str) -> FakeS3Paginator:
-        assert operation_name == "list_objects_v2"
-        return FakeS3Paginator(self._objects)
-
-    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
-        assert Bucket == "demo-bucket"
-        metadata = self._objects.get(Key)
-        if metadata is None:
-            raise self._client_error("NoSuchKey")
-        return {
-            "Body": FakeStreamingBody(metadata["Body"]),
-            "ETag": metadata["ETag"],
-        }
-
-    def put_object(
-        self,
-        *,
-        Bucket: str,
-        Key: str,
-        Body: object,
-        IfNoneMatch: str | None = None,
-    ) -> dict[str, object]:
-        assert Bucket == "demo-bucket"
-        if IfNoneMatch == "*" and Key in self._objects:
-            raise self._client_error("PreconditionFailed")
-
-        payload = Body.read() if hasattr(Body, "read") else Body
-        if not isinstance(payload, bytes):
-            payload = bytes(payload)
-        self._objects[Key] = {
-            "Body": payload,
-            "LastModified": datetime.now(timezone.utc),
-            "ETag": self._etag(payload),
-        }
-        return {"ETag": self._objects[Key]["ETag"]}
-
-    def head_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
-        assert Bucket == "demo-bucket"
-        metadata = self._objects.get(Key)
-        if metadata is None:
-            raise self._client_error("404")
-        return {"ETag": metadata["ETag"]}
-
-    def delete_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
-        assert Bucket == "demo-bucket"
-        self._objects.pop(Key, None)
-        return {}
-
-    def _etag(self, payload: bytes) -> str:
-        return f'"{len(payload):x}-{sum(payload):x}"'
-
-    def _client_error(self, code: str) -> ClientError:
-        return ClientError({"Error": {"Code": code, "Message": code}}, "fake_s3")
-
-
-def install_fake_s3(monkeypatch, objects: dict[str, bytes]) -> FakeS3Client:
-    client = FakeS3Client(
-        {
-            key: {
-                "Body": payload,
-                "LastModified": datetime(2026, 1, 2, tzinfo=timezone.utc),
-                "ETag": f'"{len(payload):x}-{sum(payload):x}"',
-            }
-            for key, payload in objects.items()
-        }
-    )
-    monkeypatch.setattr("fluxel.core.storage.boto3.client", lambda service_name: client)
-    monkeypatch.setattr(
-        "fluxel.core.repository_store.boto3.client",
-        lambda service_name: client,
-    )
-    return client
-
-
 def test_cli_supports_global_repo_flag_for_s3_repositories(
-    tmp_path: Path, capsys, monkeypatch
+    tmp_path: Path, capsys, monkeypatch, fake_s3_installer
 ) -> None:
-    client = install_fake_s3(monkeypatch, {})
+    client = fake_s3_installer({})
     monkeypatch.chdir(tmp_path)
     repo_uri = "s3://demo-bucket/repos/demo"
 
@@ -172,9 +58,9 @@ def test_cli_supports_global_repo_flag_for_s3_repositories(
 
 
 def test_cli_metadata_only_rm_and_mv_work_for_s3_repositories(
-    tmp_path: Path, capsys, monkeypatch
+    tmp_path: Path, capsys, monkeypatch, fake_s3_installer
 ) -> None:
-    client = install_fake_s3(monkeypatch, {})
+    client = fake_s3_installer({})
     monkeypatch.chdir(tmp_path)
     repo_uri = "s3://demo-bucket/repos/demo"
 
@@ -441,6 +327,76 @@ def test_cli_staging_commit_is_branch_scoped(tmp_path: Path, capsys) -> None:
     ]
 
 
+def test_cli_remote_staged_add_preserves_existing_entries_and_uploads_one_blob(
+    tmp_path: Path, capsys, monkeypatch, fake_s3_installer
+) -> None:
+    client = fake_s3_installer({})
+    monkeypatch.chdir(tmp_path)
+    repo_uri = "s3://demo-bucket/repos/demo"
+
+    (tmp_path / "a.txt").write_text("alpha")
+    assert run_cli(["--repo", repo_uri, "commit", "-m", "initial"]) == 0
+    first_commit = capsys.readouterr().out.strip()
+    assert len(first_commit) == 64
+
+    initial_blob_keys = {
+        key for key in client._objects if key.startswith("repos/demo/blobs/")
+    }
+    assert len(initial_blob_keys) == 1
+
+    (tmp_path / "a.txt").unlink()
+    (tmp_path / "b.txt").write_text("beta")
+
+    assert run_cli(["--repo", repo_uri, "add", "b.txt"]) == 0
+    add_payload = json.loads(capsys.readouterr().out)
+    assert add_payload["added"] == ["b.txt"]
+
+    assert run_cli(["--repo", repo_uri, "commit", "--staged", "-m", "add b"]) == 0
+    second_commit = capsys.readouterr().out.strip()
+    assert len(second_commit) == 64
+    assert second_commit != first_commit
+
+    new_blob_keys = {
+        key for key in client._objects if key.startswith("repos/demo/blobs/")
+    }
+    assert len(new_blob_keys - initial_blob_keys) == 1
+
+    assert run_cli(["--repo", repo_uri, "diff", first_commit, second_commit]) == 0
+    diff_payload = json.loads(capsys.readouterr().out)
+    assert diff_payload == [
+        {
+            "path": "b.txt",
+            "change": "added",
+            "before_hash": None,
+            "after_hash": diff_payload[0]["after_hash"],
+            "before_size": None,
+            "after_size": 4,
+        }
+    ]
+
+
+def test_cli_remote_commit_recovers_from_stale_branch_lock(
+    tmp_path: Path, capsys, monkeypatch, fake_s3_installer
+) -> None:
+    client = fake_s3_installer({})
+    monkeypatch.chdir(tmp_path)
+    repo_uri = "s3://demo-bucket/repos/demo"
+    lock_key = "repos/demo/locks/refs/heads/main.lock"
+    client._objects[lock_key] = {
+        "Body": b"legacy-stale-lock",
+        "LastModified": datetime(2025, 1, 1, tzinfo=timezone.utc),
+        "ETag": '"11-11"',
+    }
+
+    (tmp_path / "a.txt").write_text("alpha")
+    assert run_cli(["--repo", repo_uri, "commit", "-m", "initial"]) == 0
+    commit_id = capsys.readouterr().out.strip()
+
+    assert len(commit_id) == 64
+    assert lock_key not in client._objects
+    assert "repos/demo/refs/heads/main" in client._objects
+
+
 def test_cli_merge_fast_forwards_target_branch(tmp_path: Path, capsys) -> None:
     (tmp_path / "shared.txt").write_text("base")
     assert run_cli(["commit", "--root", str(tmp_path), "-m", "base"]) == 0
@@ -550,10 +506,9 @@ def test_cli_merge_rejects_non_fast_forward(tmp_path: Path, capsys) -> None:
 
 
 def test_cli_import_s3_writes_manifest_and_blobs(
-    tmp_path: Path, capsys, monkeypatch
+    tmp_path: Path, capsys, fake_s3_installer
 ) -> None:
-    install_fake_s3(
-        monkeypatch,
+    fake_s3_installer(
         {
             "bootstrap/a.txt": b"alpha",
             "bootstrap/nested/b.txt": b"beta",
@@ -594,11 +549,72 @@ def test_cli_import_s3_writes_manifest_and_blobs(
         assert blob_path.exists()
 
 
-def test_cli_import_s3_metadata_entries_can_be_read_and_verified(
-    tmp_path: Path, capsys, monkeypatch
+def test_cli_import_s3_preserves_existing_manifest_entries(
+    tmp_path: Path, capsys, fake_s3_installer
 ) -> None:
-    install_fake_s3(
-        monkeypatch,
+    fake_s3_installer(
+        {
+            "bootstrap/a.txt": b"alpha",
+            "incremental/b.txt": b"beta",
+        },
+    )
+
+    assert (
+        run_cli(
+            [
+                "import",
+                "--root",
+                str(tmp_path),
+                "s3://demo-bucket/bootstrap",
+                "-m",
+                "bootstrap",
+            ]
+        )
+        == 0
+    )
+    first_commit = capsys.readouterr().out.strip()
+    assert len(first_commit) == 64
+
+    assert (
+        run_cli(
+            [
+                "import",
+                "--root",
+                str(tmp_path),
+                "s3://demo-bucket/incremental",
+                "-m",
+                "incremental",
+            ]
+        )
+        == 0
+    )
+    second_commit = capsys.readouterr().out.strip()
+    assert len(second_commit) == 64
+    assert second_commit != first_commit
+
+    commit_payload = json.loads(
+        (tmp_path / ".fluxel" / "commits" / f"{second_commit}.json").read_text()
+    )
+    manifest_path = (
+        tmp_path / ".fluxel" / "manifests" / f"{commit_payload['manifest']}.jsonl"
+    )
+    entries = list(ManifestReader(manifest_path).iter_entries())
+
+    assert [entry.path for entry in entries] == ["a.txt", "b.txt"]
+    assert {entry.source_uri for entry in entries} == {
+        "s3://demo-bucket/bootstrap/a.txt",
+        "s3://demo-bucket/incremental/b.txt",
+    }
+    assert (
+        sum(1 for path in (tmp_path / ".fluxel" / "blobs").rglob("*") if path.is_file())
+        == 2
+    )
+
+
+def test_cli_import_s3_metadata_entries_can_be_read_and_verified(
+    tmp_path: Path, capsys, fake_s3_installer
+) -> None:
+    fake_s3_installer(
         {
             "imports/a.txt": b"alpha",
             "imports/nested/b.txt": b"beta",
@@ -641,10 +657,9 @@ def test_cli_import_s3_metadata_entries_can_be_read_and_verified(
 
 
 def test_cli_import_s3_supports_repeated_path_filters(
-    tmp_path: Path, capsys, monkeypatch
+    tmp_path: Path, capsys, fake_s3_installer
 ) -> None:
-    install_fake_s3(
-        monkeypatch,
+    fake_s3_installer(
         {
             "gallery/root.jpg": b"root-jpg",
             "gallery/root.txt": b"root-txt",
@@ -683,10 +698,9 @@ def test_cli_import_s3_supports_repeated_path_filters(
 
 
 def test_cli_import_s3_path_star_imports_all_entries(
-    tmp_path: Path, capsys, monkeypatch
+    tmp_path: Path, capsys, fake_s3_installer
 ) -> None:
-    install_fake_s3(
-        monkeypatch,
+    fake_s3_installer(
         {
             "all/a.txt": b"a",
             "all/nested/b.jpg": b"b",
@@ -716,10 +730,9 @@ def test_cli_import_s3_path_star_imports_all_entries(
 
 
 def test_cli_dataset_can_mix_s3_meta_local_blake3_and_verified_s3_entries(
-    tmp_path: Path, capsys, monkeypatch
+    tmp_path: Path, capsys, fake_s3_installer
 ) -> None:
-    install_fake_s3(
-        monkeypatch,
+    fake_s3_installer(
         {
             "dataset/root.txt": b"root-from-s3",
             "dataset/images/cat.jpg": b"cat-image",
@@ -869,10 +882,9 @@ def test_cli_dataset_can_mix_s3_meta_local_blake3_and_verified_s3_entries(
 
 
 def test_cli_meta_import_branch_removal_and_fast_forward_merge(
-    tmp_path: Path, capsys, monkeypatch
+    tmp_path: Path, capsys, fake_s3_installer
 ) -> None:
-    install_fake_s3(
-        monkeypatch,
+    fake_s3_installer(
         {
             "images/image0.jpg": b"image-0",
             "images/image1.jpg": b"image-1",

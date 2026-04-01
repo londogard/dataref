@@ -35,6 +35,7 @@ Fluxel is intentionally in MVP mode.
 - Repository URI support via `--repo <path|s3://bucket/prefix>` and `open_repository(...)`.
 - Streaming S3 imports (`fluxel import`) with `blake3` or metadata identity modes.
 - Branch-scoped staging workflow (`fluxel add`, `fluxel rm`, `fluxel status`, `fluxel commit --staged`).
+- Incremental ingress paths that preserve existing manifest entries while adding only new content metadata/blobs.
 - Commit identity modes: `blake3` (default) and `meta` (`hash(path+size)`).
 - Verify command to promote metadata-only entries to canonical blobs (`fluxel verify`).
 - Zero-copy branch pointers (`fluxel branch`).
@@ -50,7 +51,7 @@ Fluxel is intentionally in MVP mode.
 - No remote sync CLI (`push/pull/fetch`) yet.
 - No `log/status/list/checkout` CLI surface yet.
 - No `s5cmd` command-list generation path for bulk transfer yet.
-- S3 branch locking still has no stale-lock recovery if a client dies mid-update; orphaned lock objects currently require manual cleanup.
+- S3 branch locking now recovers expired stale lock objects automatically, but there is still no operator-facing lock inspection or cleanup command.
 
 ## Technical Stack
 
@@ -78,6 +79,7 @@ uv run fluxel --repo /tmp/fluxel-demo commit -m "fast metadata snapshot" --ident
 uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/bootstrap -m "bootstrap import"
 uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/bootstrap -m "metadata import" --identity meta
 uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/bootstrap -m "jpg subset" --path "**/*.jpg" --path root.csv
+uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/incremental -m "add new import batch"
 uv run fluxel --repo /tmp/fluxel-demo verify --ref main
 
 # branch-scoped staged flow
@@ -160,6 +162,43 @@ uv run fluxel verify --root /tmp/fluxel-demo --ref main --dry-run
 - `--dry-run` reports how many entries would be promoted without changing blobs/commits.
 - Reads bytes from each entry's `source_uri`, computes Blake3, and stores canonical blob content.
 - Writes a new commit only when at least one entry is promoted.
+
+## Incremental Ingress
+
+Fluxel's efficient content-ingress paths are:
+
+```bash
+uv run fluxel add --root /tmp/fluxel-demo local/new.csv
+uv run fluxel commit --root /tmp/fluxel-demo --staged -m "add one file"
+uv run fluxel import --root /tmp/fluxel-demo s3://my-bucket/incremental -m "merge imported batch"
+uv run fluxel verify --root /tmp/fluxel-demo --ref main --path images --path root.txt
+```
+
+- `add` + `commit --staged` preserves the current branch manifest and reads bytes only for staged additions.
+- `import` merges imported S3 entries into the current branch manifest instead of replacing the snapshot.
+- `verify` reads bytes only for selected metadata-only entries that still need canonical blobs.
+- Existing manifest entries are preserved without re-uploading unchanged blob content.
+
+## S3 Integration Tests
+
+Fluxel includes `integration`-marked tests for real S3-compatible behavior. The preferred target is Ministack.
+
+Set these environment variables before running the suite:
+
+```bash
+export FLUXEL_MINISTACK_ENDPOINT=http://127.0.0.1:9000
+export FLUXEL_MINISTACK_ACCESS_KEY=ministack
+export FLUXEL_MINISTACK_SECRET_KEY=ministack123
+export FLUXEL_MINISTACK_REGION=us-east-1
+```
+
+Then run:
+
+```bash
+uv run pytest tests/test_s3_integration.py -m integration
+```
+
+If `FLUXEL_MINISTACK_ENDPOINT` is unset or the endpoint is unreachable, the integration tests skip automatically.
 
 ## Merge Command
 

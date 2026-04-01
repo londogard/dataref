@@ -8,10 +8,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from pathlib import PurePosixPath
 from tempfile import NamedTemporaryFile
 from typing import Iterator, Literal
 
@@ -26,6 +25,18 @@ from .repository_store import (
     LocalRepositoryStore,
     RepositoryStore,
     S3RepositoryStore,
+)
+from .repository_support import (
+    matches_any_logical_path,
+    matches_import_patterns,
+    matches_logical_path,
+    metadata_identity,
+    move_logical_path,
+    normalize_import_patterns,
+    normalize_logical_paths,
+    normalize_repository_path,
+    normalize_s3_import_path,
+    relocate_manifest_entry,
 )
 from .storage import iter_s3_objects, open_source_uri, parse_s3_uri
 
@@ -285,18 +296,30 @@ class FluxelRepository:
             raise ValueError("identity_mode must be one of: blake3, meta")
         branch = ref or self.current_branch()
         branch_state = self._require_branch_state(branch)
+        parent_commit = branch_state.commit_id
 
-        temp_manifest = self._write_temp_manifest(
-            self._materialize_s3_entries(
-                source_uri=source_uri,
-                identity_mode=identity_mode,
-                path_patterns=path_patterns,
-            )
-        )
+        index: dict[str, ManifestEntry]
+        if parent_commit:
+            parent = self.read_commit(parent_commit)
+            index = self._manifest_index(parent.manifest)
+        else:
+            index = {}
+
+        for entry in self._materialize_s3_entries(
+            source_uri=source_uri,
+            identity_mode=identity_mode,
+            path_patterns=path_patterns,
+        ):
+            index[entry.path] = entry
+
+        def iter_entries() -> Iterator[ManifestEntry]:
+            for path in sorted(index):
+                yield index[path]
+
+        temp_manifest = self._write_temp_manifest(iter_entries())
         manifest_hash = blake3_digest_file(temp_manifest)
         self._persist_manifest(temp_manifest, manifest_hash)
 
-        parent_commit = branch_state.commit_id
         return self._write_commit_object(
             branch=branch,
             message=message,
@@ -319,7 +342,7 @@ class FluxelRepository:
         self._ensure_branch_exists(branch)
         staged = self._load_stage(branch)
         for path in paths:
-            normalized = self._normalize_stage_path(path)
+            normalized = normalize_repository_path(path)
             source = self.root / normalized
             if not source.exists() or not source.is_file():
                 raise FileNotFoundError(f"Cannot stage missing file: {normalized}")
@@ -336,7 +359,7 @@ class FluxelRepository:
         self._ensure_branch_exists(branch)
         staged = self._load_stage(branch)
         for path in paths:
-            normalized = self._normalize_stage_path(path)
+            normalized = normalize_repository_path(path)
             staged[normalized] = StageChange(path=normalized, action="remove")
         self._save_stage(branch, staged)
         return self.status(ref=branch)
@@ -353,13 +376,13 @@ class FluxelRepository:
         branch = ref or self.current_branch()
         branch_state = self._require_branch_state(branch)
         base_commit = self._require_commit_for_metadata_mutation(branch_state.branch)
-        normalized_paths = self._normalize_logical_paths(paths)
+        normalized_paths = normalize_logical_paths(paths)
         removed_paths: set[str] = set()
 
         def iter_entries() -> Iterator[ManifestEntry]:
             nonlocal removed_paths
             for entry in self.store.iter_manifest_entries(base_commit.manifest):
-                if self._matches_any_logical_path(entry.path, normalized_paths):
+                if matches_any_logical_path(entry.path, normalized_paths):
                     removed_paths.add(entry.path)
                     continue
                 yield entry
@@ -399,8 +422,8 @@ class FluxelRepository:
         branch = ref or self.current_branch()
         branch_state = self._require_branch_state(branch)
         base_commit = self._require_commit_for_metadata_mutation(branch_state.branch)
-        source = self._normalize_stage_path(source_path)
-        destination = self._normalize_stage_path(destination_path)
+        source = normalize_repository_path(source_path)
+        destination = normalize_repository_path(destination_path)
 
         if source == destination:
             raise ValueError("Source and destination paths must differ")
@@ -414,9 +437,9 @@ class FluxelRepository:
 
         for entry in self.store.iter_manifest_entries(base_commit.manifest):
             existing_paths.add(entry.path)
-            if not self._matches_logical_path(entry.path, source):
+            if not matches_logical_path(entry.path, source):
                 continue
-            moved_path = self._move_logical_path(
+            moved_path = move_logical_path(
                 entry.path,
                 source_path=source,
                 destination_path=destination,
@@ -443,7 +466,7 @@ class FluxelRepository:
                 if moved_path is None:
                     yield entry
                     continue
-                yield self._relocate_manifest_entry(entry, moved_path)
+                yield relocate_manifest_entry(entry, moved_path)
 
         temp_manifest = self._write_temp_manifest(iter_entries())
         manifest_hash = blake3_digest_file(temp_manifest)
@@ -689,7 +712,7 @@ class FluxelRepository:
                 blob_hash = identity_value
                 self._store_blob(file_path, blob_hash)
             else:
-                identity_value = self._metadata_identity(relative_path, stat.st_size)
+                identity_value = metadata_identity(relative_path, stat.st_size)
                 blob_hash = None
             yield ManifestEntry(
                 path=relative_path,
@@ -711,22 +734,22 @@ class FluxelRepository:
     ) -> Iterator[ManifestEntry]:
         _, prefix = parse_s3_uri(source_uri)
         normalized_prefix = prefix.strip("/")
-        normalized_patterns = self._normalize_import_patterns(path_patterns)
+        normalized_patterns = normalize_import_patterns(path_patterns)
         for obj in iter_s3_objects(source_uri):
-            relative_path = self._normalize_s3_import_path(
+            relative_path = normalize_s3_import_path(
                 key=obj.key,
                 prefix=normalized_prefix,
                 size=obj.size,
             )
             if relative_path is None:
                 continue
-            if not self._matches_import_patterns(relative_path, normalized_patterns):
+            if not matches_import_patterns(relative_path, normalized_patterns):
                 continue
             if identity_mode == "blake3":
                 identity_value = self._store_blob_from_source_uri(obj.source_uri)
                 blob_hash = identity_value
             elif identity_mode == "meta":
-                identity_value = self._metadata_identity(relative_path, obj.size)
+                identity_value = metadata_identity(relative_path, obj.size)
                 blob_hash = None
             else:
                 raise ValueError("identity_mode must be one of: blake3, meta")
@@ -761,7 +784,7 @@ class FluxelRepository:
             else:
                 blob_hash = None
         elif identity_mode == "meta":
-            identity_value = self._metadata_identity(relative_path, stat.st_size)
+            identity_value = metadata_identity(relative_path, stat.st_size)
             blob_hash = None
         else:
             raise ValueError("identity_mode must be one of: blake3, meta")
@@ -775,137 +798,6 @@ class FluxelRepository:
             blob_hash=blob_hash,
             source_uri=source_uri,
         )
-
-    def _metadata_identity(self, relative_path: str, size: int) -> str:
-        payload = f"{relative_path}\n{size}".encode("utf-8")
-        return blake3(payload).hexdigest()
-
-    def _normalize_s3_import_path(
-        self,
-        *,
-        key: str,
-        prefix: str,
-        size: int,
-    ) -> str | None:
-        if key.endswith("/") and size == 0:
-            return None
-        normalized_key = key.strip("/")
-        if not normalized_key:
-            return None
-        normalized_prefix = prefix.strip("/")
-        if normalized_prefix:
-            if normalized_key == normalized_prefix:
-                relative_path = normalized_key.rsplit("/", maxsplit=1)[-1]
-            elif normalized_key.startswith(f"{normalized_prefix}/"):
-                relative_path = normalized_key[len(normalized_prefix) + 1 :]
-            else:
-                raise ValueError(f"S3 key '{key}' is outside import prefix '{prefix}'")
-        else:
-            relative_path = normalized_key
-        return self._normalize_stage_path(relative_path)
-
-    def _normalize_import_patterns(
-        self,
-        path_patterns: list[str] | None,
-    ) -> list[str]:
-        patterns: list[str] = []
-        for pattern in path_patterns or []:
-            normalized = pattern.strip().strip("/")
-            if not normalized:
-                raise ValueError("Import path filter cannot be empty")
-            if (
-                normalized.startswith("../")
-                or "/../" in normalized
-                or normalized == ".."
-            ):
-                raise ValueError(
-                    "Import path filter cannot traverse outside repository root"
-                )
-            patterns.append(normalized)
-        return patterns
-
-    def _matches_import_patterns(
-        self,
-        relative_path: str,
-        path_patterns: list[str],
-    ) -> bool:
-        if not path_patterns:
-            return True
-        path = PurePosixPath(relative_path)
-        return any(
-            self._match_import_pattern(path, pattern) for pattern in path_patterns
-        )
-
-    def _match_import_pattern(
-        self,
-        path: PurePosixPath,
-        pattern: str,
-    ) -> bool:
-        if path.match(pattern):
-            return True
-        if pattern.startswith("**/"):
-            pattern_suffix = pattern[len("**/") :]
-            return len(path.parts) == 1 and path.match(pattern_suffix)
-        return False
-
-    def _normalize_stage_path(self, path: str) -> str:
-        normalized = path.strip().strip("/")
-        if not normalized:
-            raise ValueError("Path cannot be empty")
-        if normalized.startswith("../") or "/../" in normalized or normalized == "..":
-            raise ValueError("Path cannot traverse outside repository root")
-        return normalized
-
-    def _normalize_logical_paths(self, paths: list[str]) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for path in paths:
-            value = self._normalize_stage_path(path)
-            if value in seen:
-                continue
-            seen.add(value)
-            normalized.append(value)
-        return normalized
-
-    def _matches_logical_path(self, entry_path: str, logical_path: str) -> bool:
-        return entry_path == logical_path or entry_path.startswith(f"{logical_path}/")
-
-    def _matches_any_logical_path(
-        self,
-        entry_path: str,
-        logical_paths: list[str],
-    ) -> bool:
-        return any(
-            self._matches_logical_path(entry_path, logical_path)
-            for logical_path in logical_paths
-        )
-
-    def _move_logical_path(
-        self,
-        entry_path: str,
-        *,
-        source_path: str,
-        destination_path: str,
-    ) -> str:
-        if entry_path == source_path:
-            return destination_path
-        suffix = entry_path[len(source_path) :]
-        return f"{destination_path}{suffix}"
-
-    def _relocate_manifest_entry(
-        self,
-        entry: ManifestEntry,
-        destination_path: str,
-    ) -> ManifestEntry:
-        if entry.identity_mode == "meta":
-            identity_value = self._metadata_identity(destination_path, entry.size)
-            return replace(
-                entry,
-                path=destination_path,
-                hash=identity_value,
-                identity_value=identity_value,
-            )
-        return replace(entry, path=destination_path)
 
     def _load_stage(self, branch: str) -> dict[str, StageChange]:
         stage_payload = self.client_state.read_staging_payload(branch)

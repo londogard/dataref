@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 from typing import BinaryIO, Iterator, Literal, Protocol
@@ -15,6 +16,7 @@ from .storage import OptimisticLockError
 
 
 RepositoryObjectKind = Literal["blob", "commit", "manifest", "ref"]
+DEFAULT_BRANCH_LOCK_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,13 @@ class BranchRefState:
     branch: str
     commit_id: str | None
     version_token: str | None
+
+
+@dataclass(frozen=True)
+class BranchLockState:
+    token: str
+    expires_at: datetime | None
+    last_modified: datetime | None
 
 
 class RepositoryStore(Protocol):
@@ -201,10 +210,12 @@ class S3RepositoryStore:
         prefix: str = "",
         *,
         client: object | None = None,
+        lock_timeout_seconds: int = DEFAULT_BRANCH_LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self.bucket = bucket
         self.prefix = prefix.strip("/")
         self.client = client or boto3.client("s3")
+        self.lock_timeout_seconds = max(1, lock_timeout_seconds)
 
     def read_commit_bytes(self, commit_id: str) -> bytes | None:
         try:
@@ -384,11 +395,32 @@ class S3RepositoryStore:
         return suffix
 
     def _acquire_branch_lock(self, branch: str, token: str) -> bool:
+        if self._try_acquire_branch_lock(branch, token):
+            return True
+
+        current_lock = self._read_branch_lock(branch)
+        if current_lock is None or not self._is_stale_branch_lock(current_lock):
+            return False
+
+        self._release_branch_lock(branch, current_lock.token)
+        return self._try_acquire_branch_lock(branch, token)
+
+    def _try_acquire_branch_lock(self, branch: str, token: str) -> bool:
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=self.lock_timeout_seconds
+        )
+        payload = json.dumps(
+            {
+                "token": token,
+                "expires_at": expires_at.isoformat(),
+            },
+            sort_keys=True,
+        ).encode("utf-8")
         try:
             self.client.put_object(
                 Bucket=self.bucket,
                 Key=self._lock_key(branch),
-                Body=token.encode("utf-8"),
+                Body=payload,
                 IfNoneMatch="*",
             )
         except ClientError as error:
@@ -397,21 +429,76 @@ class S3RepositoryStore:
             raise
         return True
 
-    def _release_branch_lock(self, branch: str, token: str) -> None:
+    def _read_branch_lock(self, branch: str) -> BranchLockState | None:
         try:
             response = self.client.get_object(
-                Bucket=self.bucket, Key=self._lock_key(branch)
+                Bucket=self.bucket,
+                Key=self._lock_key(branch),
             )
         except ClientError as error:
             if self._missing(error):
-                return
+                return None
             raise
+
         body = response["Body"]
         try:
-            current_token = body.read().decode("utf-8")
+            raw_payload = body.read().decode("utf-8")
         finally:
             body.close()
-        if current_token != token:
+
+        last_modified_raw = response.get("LastModified")
+        last_modified: datetime | None = None
+        if isinstance(last_modified_raw, datetime):
+            if last_modified_raw.tzinfo is None:
+                last_modified = last_modified_raw.replace(tzinfo=timezone.utc)
+            else:
+                last_modified = last_modified_raw.astimezone(timezone.utc)
+
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            payload = None
+
+        if isinstance(payload, dict):
+            token = str(payload.get("token") or "").strip()
+            expires_at_raw = payload.get("expires_at")
+            expires_at: datetime | None = None
+            if isinstance(expires_at_raw, str) and expires_at_raw:
+                expires_at = datetime.fromisoformat(expires_at_raw)
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                else:
+                    expires_at = expires_at.astimezone(timezone.utc)
+            if token:
+                return BranchLockState(
+                    token=token,
+                    expires_at=expires_at,
+                    last_modified=last_modified,
+                )
+
+        token = raw_payload.strip()
+        if not token:
+            return None
+        return BranchLockState(
+            token=token,
+            expires_at=None,
+            last_modified=last_modified,
+        )
+
+    def _is_stale_branch_lock(self, lock_state: BranchLockState) -> bool:
+        now = datetime.now(timezone.utc)
+        if lock_state.expires_at is not None:
+            return lock_state.expires_at <= now
+        if lock_state.last_modified is None:
+            return False
+        return (
+            lock_state.last_modified + timedelta(seconds=self.lock_timeout_seconds)
+            <= now
+        )
+
+    def _release_branch_lock(self, branch: str, token: str) -> None:
+        current_lock = self._read_branch_lock(branch)
+        if current_lock is None or current_lock.token != token:
             return
         self.client.delete_object(Bucket=self.bucket, Key=self._lock_key(branch))
 

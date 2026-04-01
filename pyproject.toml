@@ -24,3 +24,8 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = ["pytest>=9.0.2"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that require a real S3-compatible service such as Ministack",
+]
