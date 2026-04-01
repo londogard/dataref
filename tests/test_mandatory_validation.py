@@ -3,6 +3,8 @@ from __future__ import annotations
 import tracemalloc
 from pathlib import Path
 
+from blake3 import blake3
+
 from fluxel.core import (
     FluxelFileSystem,
     FluxelRepository,
@@ -67,6 +69,68 @@ def test_metadata_only_diff_does_not_read_blobs(tmp_path: Path, monkeypatch) -> 
         ("a.txt", "modified"),
         ("b.txt", "added"),
     }
+    assert touched_blob_reads == []
+
+
+def test_metadata_only_remove_does_not_read_blobs(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "a.txt").write_text("alpha")
+    (tmp_path / "b.txt").write_text("beta")
+    repo = FluxelRepository(tmp_path)
+    repo.commit("initial")
+
+    touched_blob_reads: list[Path] = []
+    original_read_bytes = Path.read_bytes
+
+    def tracking_read_bytes(path: Path) -> bytes:
+        path_obj = Path(path)
+        if ".fluxel" in path_obj.parts and "blobs" in path_obj.parts:
+            touched_blob_reads.append(path_obj)
+        return original_read_bytes(path_obj)
+
+    monkeypatch.setattr(Path, "read_bytes", tracking_read_bytes)
+
+    result = repo.remove_paths(["a.txt"], "remove a")
+
+    assert result.removed_paths == ["a.txt"]
+    assert set(repo.resolve_entries("main")) == {"b.txt"}
+    assert touched_blob_reads == []
+
+
+def test_metadata_only_move_updates_meta_identity_without_blob_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    nested = tmp_path / "dir"
+    nested.mkdir()
+    (nested / "file.txt").write_text("payload")
+    repo = FluxelRepository(tmp_path)
+    repo.commit("metadata only", identity_mode="meta")
+    before_entry = repo.resolve_entries("main")["dir/file.txt"]
+
+    touched_blob_reads: list[Path] = []
+    original_read_bytes = Path.read_bytes
+
+    def tracking_read_bytes(path: Path) -> bytes:
+        path_obj = Path(path)
+        if ".fluxel" in path_obj.parts and "blobs" in path_obj.parts:
+            touched_blob_reads.append(path_obj)
+        return original_read_bytes(path_obj)
+
+    monkeypatch.setattr(Path, "read_bytes", tracking_read_bytes)
+
+    result = repo.move("dir", "archive", "rename prefix")
+    after_entries = repo.resolve_entries("main")
+    moved_entry = after_entries["archive/file.txt"]
+    expected_identity = blake3(
+        f"archive/file.txt\n{before_entry.size}".encode("utf-8")
+    ).hexdigest()
+
+    assert result.moved_paths == ["archive/file.txt"]
+    assert "dir/file.txt" not in after_entries
+    assert moved_entry.identity_mode == "meta"
+    assert moved_entry.hash == expected_identity
+    assert moved_entry.identity_value == expected_identity
+    assert moved_entry.blob_hash is None
+    assert moved_entry.source_uri == before_entry.source_uri
     assert touched_blob_reads == []
 
 

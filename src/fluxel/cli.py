@@ -18,7 +18,9 @@ from .core import (
     drop_analytical_index,
     import_s3,
     merge,
+    move,
     query_analytical_index,
+    remove,
     rm,
     status,
     verify,
@@ -87,6 +89,11 @@ class AddArgs:
 @dataclass
 class RmArgs:
     paths: list[str] = field(positional=True, nargs="+", help="Paths to remove")
+    message: str | None = field(
+        default=None,
+        alias=["-m", "--message"],
+        help="Commit message for a metadata-only removal",
+    )
     root: str = field(
         default=".",
         alias=["--repo", "--root"],
@@ -95,6 +102,29 @@ class RmArgs:
     ref: str | None = field(
         default=None,
         help="Branch ref for staging (defaults to current branch)",
+    )
+    staged: bool = flag(
+        False,
+        help="Stage removals instead of writing a metadata-only commit",
+    )
+
+
+@dataclass
+class MoveArgs:
+    source_path: str = field(positional=True, help="Path or prefix to rename")
+    destination_path: str = field(
+        positional=True,
+        help="Destination path or prefix",
+    )
+    message: str = field(alias=["-m", "--message"], help="Commit message")
+    root: str = field(
+        default=".",
+        alias=["--repo", "--root"],
+        help="Repository path or URI",
+    )
+    ref: str | None = field(
+        default=None,
+        help="Branch ref to update (defaults to current branch)",
     )
 
 
@@ -212,6 +242,7 @@ class FluxelCLI:
         | ImportArgs
         | AddArgs
         | RmArgs
+        | MoveArgs
         | StatusArgs
         | BranchArgs
         | DiffArgs
@@ -224,6 +255,7 @@ class FluxelCLI:
             "import": ImportArgs,
             "add": AddArgs,
             "rm": RmArgs,
+            "mv": MoveArgs,
             "status": StatusArgs,
             "branch": BranchArgs,
             "diff": DiffArgs,
@@ -328,12 +360,63 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 0
 
     if isinstance(command, RmArgs):
-        stage = rm(
-            root=command.root,
-            paths=command.paths,
-            ref=command.ref,
-        )
+        if command.message is not None and command.staged:
+            print(
+                "rm error: cannot combine --message with --staged",
+                file=sys.stderr,
+            )
+            return 2
+        if command.message is not None:
+            try:
+                result = remove(
+                    root=command.root,
+                    paths=command.paths,
+                    message=command.message,
+                    ref=command.ref,
+                )
+            except (FileNotFoundError, RefConflictError, ValueError) as error:
+                print(f"rm error: {error}", file=sys.stderr)
+                return 2
+            print(
+                json.dumps(
+                    {
+                        "ref": result.ref,
+                        "commit_id": result.commit_id,
+                        "removed_paths": result.removed_paths,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+
+        stage = rm(root=command.root, paths=command.paths, ref=command.ref)
         print(json.dumps(_stage_payload(stage), indent=2))
+        return 0
+
+    if isinstance(command, MoveArgs):
+        try:
+            result = move(
+                root=command.root,
+                source_path=command.source_path,
+                destination_path=command.destination_path,
+                message=command.message,
+                ref=command.ref,
+            )
+        except (FileNotFoundError, RefConflictError, ValueError) as error:
+            print(f"mv error: {error}", file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                {
+                    "ref": result.ref,
+                    "commit_id": result.commit_id,
+                    "source_path": result.source_path,
+                    "destination_path": result.destination_path,
+                    "moved_paths": result.moved_paths,
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if isinstance(command, StatusArgs):

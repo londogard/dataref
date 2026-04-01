@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -66,6 +66,22 @@ class MergeResult:
     target_ref: str
     commit_id: str
     updated: bool
+
+
+@dataclass(frozen=True)
+class RemoveResult:
+    ref: str
+    commit_id: str
+    removed_paths: list[str]
+
+
+@dataclass(frozen=True)
+class MoveResult:
+    ref: str
+    commit_id: str
+    source_path: str
+    destination_path: str
+    moved_paths: list[str]
 
 
 @dataclass(frozen=True)
@@ -324,6 +340,129 @@ class FluxelRepository:
             staged[normalized] = StageChange(path=normalized, action="remove")
         self._save_stage(branch, staged)
         return self.status(ref=branch)
+
+    def remove_paths(
+        self,
+        paths: list[str],
+        message: str,
+        *,
+        ref: str | None = None,
+    ) -> RemoveResult:
+        if not message.strip():
+            raise ValueError("Commit message cannot be empty")
+        branch = ref or self.current_branch()
+        branch_state = self._require_branch_state(branch)
+        base_commit = self._require_commit_for_metadata_mutation(branch_state.branch)
+        normalized_paths = self._normalize_logical_paths(paths)
+        removed_paths: set[str] = set()
+
+        def iter_entries() -> Iterator[ManifestEntry]:
+            nonlocal removed_paths
+            for entry in self.store.iter_manifest_entries(base_commit.manifest):
+                if self._matches_any_logical_path(entry.path, normalized_paths):
+                    removed_paths.add(entry.path)
+                    continue
+                yield entry
+
+        temp_manifest = self._write_temp_manifest(iter_entries())
+        if not removed_paths:
+            temp_manifest.unlink(missing_ok=True)
+            missing = ", ".join(normalized_paths)
+            raise FileNotFoundError(f"Path not found in branch '{branch}': {missing}")
+
+        manifest_hash = blake3_digest_file(temp_manifest)
+        self._persist_manifest(temp_manifest, manifest_hash)
+        commit_id = self._write_commit_object(
+            branch=branch,
+            message=message,
+            parent_commit=branch_state.commit_id,
+            manifest_hash=manifest_hash,
+            expected_version_token=branch_state.version_token,
+            operation="rm",
+        )
+        return RemoveResult(
+            ref=branch,
+            commit_id=commit_id,
+            removed_paths=sorted(removed_paths),
+        )
+
+    def move(
+        self,
+        source_path: str,
+        destination_path: str,
+        message: str,
+        *,
+        ref: str | None = None,
+    ) -> MoveResult:
+        if not message.strip():
+            raise ValueError("Commit message cannot be empty")
+        branch = ref or self.current_branch()
+        branch_state = self._require_branch_state(branch)
+        base_commit = self._require_commit_for_metadata_mutation(branch_state.branch)
+        source = self._normalize_stage_path(source_path)
+        destination = self._normalize_stage_path(destination_path)
+
+        if source == destination:
+            raise ValueError("Source and destination paths must differ")
+        if destination.startswith(f"{source}/"):
+            raise ValueError("Cannot move a path into itself")
+
+        existing_paths: set[str] = set()
+        source_paths: list[str] = []
+        moved_paths: list[str] = []
+        path_map: dict[str, str] = {}
+
+        for entry in self.store.iter_manifest_entries(base_commit.manifest):
+            existing_paths.add(entry.path)
+            if not self._matches_logical_path(entry.path, source):
+                continue
+            moved_path = self._move_logical_path(
+                entry.path,
+                source_path=source,
+                destination_path=destination,
+            )
+            source_paths.append(entry.path)
+            moved_paths.append(moved_path)
+            path_map[entry.path] = moved_path
+
+        if not path_map:
+            raise FileNotFoundError(f"Path not found in branch '{branch}': {source}")
+        if len(set(moved_paths)) != len(moved_paths):
+            raise ValueError("Move would create duplicate logical paths")
+
+        source_path_set = set(source_paths)
+        for moved_path in moved_paths:
+            if moved_path in existing_paths and moved_path not in source_path_set:
+                raise ValueError(
+                    f"Destination already exists in branch '{branch}': {moved_path}"
+                )
+
+        def iter_entries() -> Iterator[ManifestEntry]:
+            for entry in self.store.iter_manifest_entries(base_commit.manifest):
+                moved_path = path_map.get(entry.path)
+                if moved_path is None:
+                    yield entry
+                    continue
+                yield self._relocate_manifest_entry(entry, moved_path)
+
+        temp_manifest = self._write_temp_manifest(iter_entries())
+        manifest_hash = blake3_digest_file(temp_manifest)
+        self._persist_manifest(temp_manifest, manifest_hash)
+        commit_id = self._write_commit_object(
+            branch=branch,
+            message=message,
+            parent_commit=branch_state.commit_id,
+            manifest_hash=manifest_hash,
+            expected_version_token=branch_state.version_token,
+            operation="mv",
+        )
+        return MoveResult(
+            ref=branch,
+            commit_id=commit_id,
+            source_path=source,
+            destination_path=destination,
+            moved_paths=sorted(moved_paths),
+        )
 
     def status(self, *, ref: str | None = None) -> StageStatus:
         branch = ref or self.current_branch()
@@ -717,6 +856,57 @@ class FluxelRepository:
             raise ValueError("Path cannot traverse outside repository root")
         return normalized
 
+    def _normalize_logical_paths(self, paths: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for path in paths:
+            value = self._normalize_stage_path(path)
+            if value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
+
+    def _matches_logical_path(self, entry_path: str, logical_path: str) -> bool:
+        return entry_path == logical_path or entry_path.startswith(f"{logical_path}/")
+
+    def _matches_any_logical_path(
+        self,
+        entry_path: str,
+        logical_paths: list[str],
+    ) -> bool:
+        return any(
+            self._matches_logical_path(entry_path, logical_path)
+            for logical_path in logical_paths
+        )
+
+    def _move_logical_path(
+        self,
+        entry_path: str,
+        *,
+        source_path: str,
+        destination_path: str,
+    ) -> str:
+        if entry_path == source_path:
+            return destination_path
+        suffix = entry_path[len(source_path) :]
+        return f"{destination_path}{suffix}"
+
+    def _relocate_manifest_entry(
+        self,
+        entry: ManifestEntry,
+        destination_path: str,
+    ) -> ManifestEntry:
+        if entry.identity_mode == "meta":
+            identity_value = self._metadata_identity(destination_path, entry.size)
+            return replace(
+                entry,
+                path=destination_path,
+                hash=identity_value,
+                identity_value=identity_value,
+            )
+        return replace(entry, path=destination_path)
+
     def _load_stage(self, branch: str) -> dict[str, StageChange]:
         stage_payload = self.client_state.read_staging_payload(branch)
         if stage_payload is None:
@@ -757,6 +947,14 @@ class FluxelRepository:
         if branch_state is None:
             raise ValueError(f"Unknown branch: {branch}")
         return branch_state
+
+    def _require_commit_for_metadata_mutation(self, branch: str) -> CommitObject:
+        branch_state = self._require_branch_state(branch)
+        if not branch_state.commit_id:
+            raise FileNotFoundError(
+                f"Branch '{branch}' has no committed manifest to mutate"
+            )
+        return self.read_commit(branch_state.commit_id)
 
     def _branch_head_commit(self, branch: str) -> str | None:
         branch_ref = self.store.read_branch_ref(branch)
@@ -1009,6 +1207,32 @@ def add(
 
 def rm(root: str | Path, paths: list[str], *, ref: str | None = None) -> StageStatus:
     return open_repository(root).rm(paths, ref=ref)
+
+
+def remove(
+    root: str | Path,
+    paths: list[str],
+    message: str,
+    *,
+    ref: str | None = None,
+) -> RemoveResult:
+    return open_repository(root).remove_paths(paths, message, ref=ref)
+
+
+def move(
+    root: str | Path,
+    source_path: str,
+    destination_path: str,
+    message: str,
+    *,
+    ref: str | None = None,
+) -> MoveResult:
+    return open_repository(root).move(
+        source_path,
+        destination_path,
+        message,
+        ref=ref,
+    )
 
 
 def status(root: str | Path, *, ref: str | None = None) -> StageStatus:

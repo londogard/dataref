@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -168,6 +169,60 @@ def test_cli_supports_global_repo_flag_for_s3_repositories(
     assert not list((tmp_path / ".fluxel" / "commits").glob("*.json"))
     assert f"repos/demo/commits/{commit_b}.json" in client._objects
     assert "repos/demo/refs/heads/main" in client._objects
+
+
+def test_cli_metadata_only_rm_and_mv_work_for_s3_repositories(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    client = install_fake_s3(monkeypatch, {})
+    monkeypatch.chdir(tmp_path)
+    repo_uri = "s3://demo-bucket/repos/demo"
+
+    (tmp_path / "a.txt").write_text("one")
+    (tmp_path / "dir").mkdir()
+    (tmp_path / "dir" / "b.txt").write_text("two")
+
+    assert run_cli(["--repo", repo_uri, "commit", "-m", "initial"]) == 0
+    initial_commit = capsys.readouterr().out.strip()
+    assert initial_commit
+
+    (tmp_path / "a.txt").unlink()
+    shutil.rmtree(tmp_path / "dir")
+
+    assert (
+        run_cli(
+            [
+                "--repo",
+                repo_uri,
+                "mv",
+                "a.txt",
+                "renamed.txt",
+                "-m",
+                "rename a",
+            ]
+        )
+        == 0
+    )
+    mv_payload = json.loads(capsys.readouterr().out)
+    assert mv_payload["moved_paths"] == ["renamed.txt"]
+    moved_commit = mv_payload["commit_id"]
+
+    assert run_cli(["--repo", repo_uri, "rm", "dir", "-m", "remove dir"]) == 0
+    rm_payload = json.loads(capsys.readouterr().out)
+    assert rm_payload["removed_paths"] == ["dir/b.txt"]
+    removed_commit = rm_payload["commit_id"]
+    assert removed_commit != moved_commit
+
+    assert run_cli(["--repo", repo_uri, "diff", initial_commit, removed_commit]) == 0
+    diff_payload = json.loads(capsys.readouterr().out)
+    assert [(entry["path"], entry["change"]) for entry in diff_payload] == [
+        ("a.txt", "removed"),
+        ("dir/b.txt", "removed"),
+        ("renamed.txt", "added"),
+    ]
+
+    assert not list((tmp_path / ".fluxel" / "commits").glob("*.json"))
+    assert f"repos/demo/commits/{removed_commit}.json" in client._objects
 
 
 def test_cli_commit_branch_and_diff(tmp_path: Path, capsys) -> None:

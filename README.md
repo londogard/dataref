@@ -40,6 +40,7 @@ Fluxel is intentionally in MVP mode.
 - Zero-copy branch pointers (`fluxel branch`).
 - Fast-forward-only branch merge (`fluxel merge`).
 - Metadata-only diff between refs (`fluxel diff`).
+- Metadata-only manifest mutations for committed refs (`fluxel rm -m ...`, `fluxel mv -m ... ...`).
 - Disposable analytical index from manifest (`fluxel index build/query/drop`, DuckDB + optional Parquet export).
 - `fsspec` provider for `fluxel://` URI reads.
 - Local + S3 storage backend abstractions available in code.
@@ -91,10 +92,14 @@ uv run fluxel --repo /tmp/fluxel-demo commit -m "update"
 
 uv run fluxel --repo /tmp/fluxel-demo branch experiment
 uv run fluxel --repo /tmp/fluxel-demo diff <from_ref> <to_ref>
+uv run fluxel --repo /tmp/fluxel-demo rm old-prefix -m "remove old files"
+uv run fluxel --repo /tmp/fluxel-demo mv raw/images curated/images -m "rename image prefix"
 
 # remote repo metadata operations from the current working tree
 uv run fluxel --repo s3://my-bucket/datasets/demo branch feature
 uv run fluxel --repo s3://my-bucket/datasets/demo commit -m "snapshot current working tree"
+uv run fluxel --repo s3://my-bucket/datasets/demo rm obsolete -m "drop obsolete paths"
+uv run fluxel --repo s3://my-bucket/datasets/demo mv bootstrap final -m "rename imported prefix"
 ```
 
 ## Analytical Index (Derived, Disposable)
@@ -168,6 +173,21 @@ uv run fluxel merge --root /tmp/fluxel-demo feature main
 - The target ref must be a branch.
 - The merge succeeds only when the target branch head is an ancestor of the source ref.
 - Non-fast-forward merges are rejected.
+
+## Metadata-Only Remove And Move
+
+`fluxel rm` and `fluxel mv` can mutate committed refs directly by writing a new manifest and commit:
+
+```bash
+uv run fluxel rm --root /tmp/fluxel-demo logs/2025 -m "remove old logs"
+uv run fluxel mv --root /tmp/fluxel-demo incoming/images curated/images -m "rename prefix"
+uv run fluxel rm --repo s3://my-bucket/datasets/demo temp -m "drop temp data"
+```
+
+- These operations read manifest metadata only; they do not download unchanged blob payloads.
+- `rm` accepts file paths or path prefixes and removes all matching logical entries.
+- `mv` accepts a file path or prefix and rewrites matching logical paths in the manifest.
+- Existing staged behavior remains available: `fluxel rm` without `-m/--message` still stages removals for `fluxel commit --staged`.
 
 ## Repository Layout
 
