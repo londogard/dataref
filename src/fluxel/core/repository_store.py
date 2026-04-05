@@ -54,6 +54,8 @@ class RepositoryStore(Protocol):
         if_missing: bool = False,
     ) -> None: ...
 
+    def branch_path(self, branch: str) -> Path: ...
+
     def read_branch_ref(self, branch: str) -> BranchRefState | None: ...
 
     def write_branch_ref(self, branch: str, commit_id: str | None) -> None: ...
@@ -83,7 +85,7 @@ class RepositoryStore(Protocol):
     ) -> str | None: ...
 
 
-class LocalRepositoryStore:
+class LocalRepositoryStore(RepositoryStore):
     def __init__(self, root: str | Path) -> None:
         self.layout = initialize_fluxel_layout(root)
 
@@ -203,18 +205,20 @@ class LocalRepositoryStore:
         return self.branch_path(object_id)
 
 
-class S3RepositoryStore:
+class S3RepositoryStore(RepositoryStore):
     def __init__(
         self,
         bucket: str,
         prefix: str = "",
         *,
         client: object | None = None,
+        branch_root: str | Path | None = None,
         lock_timeout_seconds: int = DEFAULT_BRANCH_LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self.bucket = bucket
         self.prefix = prefix.strip("/")
         self.client = client or boto3.client("s3")
+        self.branch_root = Path(branch_root).resolve() if branch_root else None
         self.lock_timeout_seconds = max(1, lock_timeout_seconds)
 
     def read_commit_bytes(self, commit_id: str) -> bytes | None:
@@ -301,6 +305,11 @@ class S3RepositoryStore:
             commit_id=commit_id,
             version_token=response.get("ETag", "").strip('"') or None,
         )
+
+    def branch_path(self, branch: str) -> Path:
+        if self.branch_root is not None:
+            return self.branch_root / branch
+        return Path(".fluxel") / "refs" / "heads" / branch
 
     def write_branch_ref(self, branch: str, commit_id: str | None) -> None:
         payload = f"{commit_id}\n".encode("utf-8") if commit_id else b""

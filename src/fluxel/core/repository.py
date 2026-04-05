@@ -159,9 +159,7 @@ class FluxelRepository:
         return self.layout.root
 
     def _branch_path(self, branch_name: str) -> Path:
-        if isinstance(self.store, LocalRepositoryStore):
-            return self.store.branch_path(branch_name)
-        return self.layout.heads_dir / branch_name
+        return self.store.branch_path(branch_name)
 
     def _ensure_head(self, default_branch: str) -> None:
         self.client_state.ensure_current_branch(default_branch)
@@ -1031,7 +1029,12 @@ def open_repository(
         )
         return FluxelRepository(
             worktree_root,
-            store=S3RepositoryStore(bucket, prefix, client=s3_client),
+            store=S3RepositoryStore(
+                bucket,
+                prefix,
+                client=s3_client,
+                branch_root=worktree_root / ".fluxel" / "refs" / "heads",
+            ),
             client_state=LocalClientState(resolved_client_root),
         )
 
