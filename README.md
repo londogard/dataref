@@ -68,51 +68,63 @@ uv sync
 uv run fluxel --help
 ```
 
+## License And Support
+
+Fluxel is licensed under the GNU Affero General Public License v3.0 or later.
+
+- The license keeps copyright and license notices attached to redistributed copies.
+- Modified networked deployments must make their corresponding source available under the AGPL terms.
+- That gives companies a practical reason to fund maintenance if they depend on Fluxel while keeping the project genuinely open source.
+
+If your company uses Fluxel, sponsor ongoing maintenance at <https://github.com/sponsors/londogard>.
+
 ## Quickstart
 
 ```bash
 mkdir -p /tmp/fluxel-demo
 echo "hello" > /tmp/fluxel-demo/a.txt
 
-uv run fluxel --repo /tmp/fluxel-demo commit -m "initial"
-uv run fluxel --repo /tmp/fluxel-demo commit -m "fast metadata snapshot" --identity meta
-uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/bootstrap -m "bootstrap import"
-uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/bootstrap -m "metadata import" --identity meta
-uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/bootstrap -m "jpg subset" --path "**/*.jpg" --path root.csv
-uv run fluxel --repo /tmp/fluxel-demo import s3://my-bucket/incremental -m "add new import batch"
-uv run fluxel --repo /tmp/fluxel-demo verify --ref main
+uv run fluxel commit --repo /tmp/fluxel-demo -m "initial"
+uv run fluxel commit --repo /tmp/fluxel-demo -m "fast metadata snapshot" --identity meta
+uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/bootstrap -m "bootstrap import"
+uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/bootstrap -m "metadata import" --identity meta
+uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/bootstrap -m "jpg subset" --path "**/*.jpg" --path root.csv
+uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/incremental -m "add new import batch"
+uv run fluxel verify --repo /tmp/fluxel-demo --ref main
 
 # branch-scoped staged flow
-uv run fluxel --repo /tmp/fluxel-demo branch feature
-uv run fluxel --repo /tmp/fluxel-demo add --ref feature data/new.csv
-uv run fluxel --repo /tmp/fluxel-demo status --ref feature
-uv run fluxel --repo /tmp/fluxel-demo commit --ref feature --staged -m "feature updates"
-uv run fluxel --repo /tmp/fluxel-demo merge feature main
+uv run fluxel branch --repo /tmp/fluxel-demo feature
+uv run fluxel add --repo /tmp/fluxel-demo --ref feature data/new.csv
+uv run fluxel add --repo /tmp/fluxel-demo --ref feature --as imports/raw.csv /tmp/outside-repo/raw.csv
+uv run fluxel add --repo /tmp/fluxel-demo --ref feature --as imports/bundle /tmp/outside-repo/bundle
+uv run fluxel add --repo /tmp/fluxel-demo --ref feature --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
+uv run fluxel add --repo /tmp/fluxel-demo --ref feature --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
+uv run fluxel status --repo /tmp/fluxel-demo --ref feature
+uv run fluxel commit --repo /tmp/fluxel-demo --ref feature --staged -m "feature updates"
+uv run fluxel merge --repo /tmp/fluxel-demo feature main
 
 echo "hello v2" > /tmp/fluxel-demo/a.txt
-uv run fluxel --repo /tmp/fluxel-demo commit -m "update"
+uv run fluxel commit --repo /tmp/fluxel-demo -m "update"
 
-uv run fluxel --repo /tmp/fluxel-demo branch experiment
-uv run fluxel --repo /tmp/fluxel-demo diff <from_ref> <to_ref>
-uv run fluxel --repo /tmp/fluxel-demo rm old-prefix -m "remove old files"
-uv run fluxel --repo /tmp/fluxel-demo mv raw/images curated/images -m "rename image prefix"
+uv run fluxel branch --repo /tmp/fluxel-demo experiment
+uv run fluxel diff --repo /tmp/fluxel-demo <from_ref> <to_ref>
+uv run fluxel rm --repo /tmp/fluxel-demo old-prefix -m "remove old files"
+uv run fluxel mv --repo /tmp/fluxel-demo raw/images curated/images -m "rename image prefix"
 
 # remote repo metadata operations from the current working tree
-uv run fluxel --repo s3://my-bucket/datasets/demo branch feature
-uv run fluxel --repo s3://my-bucket/datasets/demo commit -m "snapshot current working tree"
-uv run fluxel --repo s3://my-bucket/datasets/demo rm obsolete -m "drop obsolete paths"
-uv run fluxel --repo s3://my-bucket/datasets/demo mv bootstrap final -m "rename imported prefix"
+uv run fluxel branch --repo s3://my-bucket/datasets/demo feature
+uv run fluxel commit --repo s3://my-bucket/datasets/demo -m "snapshot current working tree"
+uv run fluxel rm --repo s3://my-bucket/datasets/demo obsolete -m "drop obsolete paths"
+uv run fluxel mv --repo s3://my-bucket/datasets/demo bootstrap final -m "rename imported prefix"
 ```
 
 ## Analytical Index (Derived, Disposable)
 
 ```bash
-uv run fluxel --repo /tmp/fluxel-demo index build --ref main --parquet
+uv run fluxel index build --repo /tmp/fluxel-demo --ref main --parquet
 uv run fluxel index query --db /path/to/<commit>.duckdb --sql "SELECT COUNT(*) FROM files"
 uv run fluxel index drop --db /path/to/<commit>.duckdb
 ```
-
-`--root` remains accepted as a compatibility alias for `--repo`.
 
 If the index is deleted, Fluxel remains fully functional from manifests and commits.
 
@@ -153,9 +165,9 @@ This is useful for large bootstrap imports where strong content verification can
 `fluxel verify` promotes metadata-only (`--identity meta`) manifest entries into canonical `blake3` blob-backed entries:
 
 ```bash
-uv run fluxel verify --root /tmp/fluxel-demo --ref main
-uv run fluxel verify --root /tmp/fluxel-demo --ref main --path images --path logs/2026
-uv run fluxel verify --root /tmp/fluxel-demo --ref main --dry-run
+uv run fluxel verify --repo /tmp/fluxel-demo --ref main
+uv run fluxel verify --repo /tmp/fluxel-demo --ref main --path images --path logs/2026
+uv run fluxel verify --repo /tmp/fluxel-demo --ref main --dry-run
 ```
 
 - Verifies all entries by default (or selected path prefixes with `--path`).
@@ -168,13 +180,18 @@ uv run fluxel verify --root /tmp/fluxel-demo --ref main --dry-run
 Fluxel's efficient content-ingress paths are:
 
 ```bash
-uv run fluxel add --root /tmp/fluxel-demo local/new.csv
-uv run fluxel commit --root /tmp/fluxel-demo --staged -m "add one file"
-uv run fluxel import --root /tmp/fluxel-demo s3://my-bucket/incremental -m "merge imported batch"
-uv run fluxel verify --root /tmp/fluxel-demo --ref main --path images --path root.txt
+uv run fluxel add --repo /tmp/fluxel-demo local/new.csv
+uv run fluxel add --repo /tmp/fluxel-demo --as imports/new.csv /tmp/random/new.csv
+uv run fluxel add --repo /tmp/fluxel-demo --as imports/new-batch /tmp/random/new-batch
+uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
+uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
+uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "add one file"
+uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/incremental -m "merge imported batch"
+uv run fluxel verify --repo /tmp/fluxel-demo --ref main --path images --path root.txt
 ```
 
 - `add` + `commit --staged` preserves the current branch manifest and reads bytes only for staged additions.
+- `add` accepts repo-relative files, arbitrary local files, local directories, single S3 objects, and S3 prefixes; `--as` maps a single file/object to one logical path or remaps a directory/prefix under a destination prefix.
 - `import` merges imported S3 entries into the current branch manifest instead of replacing the snapshot.
 - `verify` reads bytes only for selected metadata-only entries that still need canonical blobs.
 - Existing manifest entries are preserved without re-uploading unchanged blob content.
@@ -205,7 +222,7 @@ If `FLUXEL_MINISTACK_ENDPOINT` is unset or the endpoint is unreachable, the inte
 `fluxel merge` updates a target branch by fast-forward only:
 
 ```bash
-uv run fluxel merge --root /tmp/fluxel-demo feature main
+uv run fluxel merge --repo /tmp/fluxel-demo feature main
 ```
 
 - The source ref can be a branch or commit.
@@ -218,8 +235,8 @@ uv run fluxel merge --root /tmp/fluxel-demo feature main
 `fluxel rm` and `fluxel mv` can mutate committed refs directly by writing a new manifest and commit:
 
 ```bash
-uv run fluxel rm --root /tmp/fluxel-demo logs/2025 -m "remove old logs"
-uv run fluxel mv --root /tmp/fluxel-demo incoming/images curated/images -m "rename prefix"
+uv run fluxel rm --repo /tmp/fluxel-demo logs/2025 -m "remove old logs"
+uv run fluxel mv --repo /tmp/fluxel-demo incoming/images curated/images -m "rename prefix"
 uv run fluxel rm --repo s3://my-bucket/datasets/demo temp -m "drop temp data"
 ```
 

@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from uuid import uuid4
 from typing import BinaryIO, Iterator, Literal, Protocol
 
@@ -12,10 +13,16 @@ from botocore.exceptions import ClientError
 
 from .layout import blob_relpath, initialize_fluxel_layout
 from .manifest import ManifestEntry, ManifestReader
+from .manifest_index import (
+    build_manifest_index,
+    iter_manifest_index_entry_jsons,
+    lookup_manifest_index_entry_json,
+    parse_manifest_index_entry_json,
+)
 from .storage import OptimisticLockError
 
 
-RepositoryObjectKind = Literal["blob", "commit", "manifest", "ref"]
+RepositoryObjectKind = Literal["blob", "commit", "manifest", "manifest-index", "ref"]
 DEFAULT_BRANCH_LOCK_TIMEOUT_SECONDS = 30
 
 
@@ -54,6 +61,14 @@ class RepositoryStore(Protocol):
         if_missing: bool = False,
     ) -> None: ...
 
+    def write_manifest_index_file(
+        self,
+        manifest_hash: str,
+        source_path: str | Path,
+        *,
+        if_missing: bool = False,
+    ) -> None: ...
+
     def branch_path(self, branch: str) -> Path: ...
 
     def read_branch_ref(self, branch: str) -> BranchRefState | None: ...
@@ -69,6 +84,14 @@ class RepositoryStore(Protocol):
     ) -> bool: ...
 
     def read_blob_bytes(self, blob_hash: str) -> bytes: ...
+
+    def lookup_manifest_entry(
+        self, manifest_hash: str, logical_path: str
+    ) -> ManifestEntry | None: ...
+
+    def iter_manifest_entries_for_prefix(
+        self, manifest_hash: str, logical_prefix: str
+    ) -> Iterator[ManifestEntry]: ...
 
     def write_blob_file(
         self,
@@ -125,6 +148,20 @@ class LocalRepositoryStore(RepositoryStore):
             raise OptimisticLockError(f"Manifest already exists: {manifest_hash}")
         source.replace(manifest_path)
 
+    def write_manifest_index_file(
+        self,
+        manifest_hash: str,
+        source_path: str | Path,
+        *,
+        if_missing: bool = False,
+    ) -> None:
+        index_path = self.manifest_index_path(manifest_hash)
+        source = Path(source_path)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        if if_missing and index_path.exists():
+            raise OptimisticLockError(f"Manifest index already exists: {manifest_hash}")
+        source.replace(index_path)
+
     def read_branch_ref(self, branch: str) -> BranchRefState | None:
         branch_path = self.branch_path(branch)
         if not branch_path.exists():
@@ -157,6 +194,25 @@ class LocalRepositoryStore(RepositoryStore):
 
     def read_blob_bytes(self, blob_hash: str) -> bytes:
         return self.blob_path(blob_hash).read_bytes()
+
+    def lookup_manifest_entry(
+        self, manifest_hash: str, logical_path: str
+    ) -> ManifestEntry | None:
+        index_path = self.manifest_index_path(manifest_hash)
+        entry_json = lookup_manifest_index_entry_json(index_path, logical_path)
+        if entry_json is None:
+            return None
+        return ManifestEntry.from_dict(parse_manifest_index_entry_json(entry_json))
+
+    def iter_manifest_entries_for_prefix(
+        self, manifest_hash: str, logical_prefix: str
+    ) -> Iterator[ManifestEntry]:
+        normalized_prefix = logical_prefix.strip("/")
+        index_path = self.manifest_index_path(manifest_hash)
+        for entry_json in iter_manifest_index_entry_jsons(
+            index_path, normalized_prefix or None
+        ):
+            yield ManifestEntry.from_dict(parse_manifest_index_entry_json(entry_json))
 
     def write_blob_file(
         self,
@@ -192,6 +248,9 @@ class LocalRepositoryStore(RepositoryStore):
     def manifest_path(self, manifest_hash: str) -> Path:
         return self.layout.manifests_dir / f"{manifest_hash}.jsonl"
 
+    def manifest_index_path(self, manifest_hash: str) -> Path:
+        return self.layout.manifests_dir / f"{manifest_hash}.idx"
+
     def branch_path(self, branch: str) -> Path:
         return self.layout.heads_dir / branch
 
@@ -202,6 +261,8 @@ class LocalRepositoryStore(RepositoryStore):
             return self.commit_path(object_id)
         if kind == "manifest":
             return self.manifest_path(object_id)
+        if kind == "manifest-index":
+            return self.manifest_index_path(object_id)
         return self.branch_path(object_id)
 
 
@@ -220,6 +281,7 @@ class S3RepositoryStore(RepositoryStore):
         self.client = client or boto3.client("s3")
         self.branch_root = Path(branch_root).resolve() if branch_root else None
         self.lock_timeout_seconds = max(1, lock_timeout_seconds)
+        self._manifest_index_cache: dict[str, Path] = {}
 
     def read_commit_bytes(self, commit_id: str) -> bytes | None:
         try:
@@ -268,11 +330,23 @@ class S3RepositoryStore(RepositoryStore):
             raise
         body = response["Body"]
         try:
-            for raw_line in body.iter_lines():
+            manifest_uri = f"s3://{self.bucket}/{self._key('manifest', manifest_hash)}"
+            for line_number, raw_line in enumerate(body.iter_lines(), start=1):
                 line = raw_line.decode("utf-8").strip()
                 if not line:
                     continue
-                yield ManifestEntry.from_dict(json.loads(line))
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        f"Corrupt manifest JSON at line {line_number} in {manifest_uri}"
+                    ) from error
+                try:
+                    yield ManifestEntry.from_dict(payload)
+                except ValueError as error:
+                    raise ValueError(
+                        f"Invalid manifest entry at line {line_number} in {manifest_uri}: {error}"
+                    ) from error
         finally:
             body.close()
 
@@ -289,6 +363,21 @@ class S3RepositoryStore(RepositoryStore):
                 body=handle,
                 if_missing=if_missing,
                 error_message=f"Manifest already exists: {manifest_hash}",
+            )
+
+    def write_manifest_index_file(
+        self,
+        manifest_hash: str,
+        source_path: str | Path,
+        *,
+        if_missing: bool = False,
+    ) -> None:
+        with Path(source_path).open("rb") as handle:
+            self._put_stream(
+                key=self._key("manifest-index", manifest_hash),
+                body=handle,
+                if_missing=if_missing,
+                error_message=f"Manifest index already exists: {manifest_hash}",
             )
 
     def read_branch_ref(self, branch: str) -> BranchRefState | None:
@@ -346,6 +435,30 @@ class S3RepositoryStore(RepositoryStore):
         )
         return response["Body"].read()
 
+    def lookup_manifest_entry(
+        self, manifest_hash: str, logical_path: str
+    ) -> ManifestEntry | None:
+        index_path = self._cached_manifest_index_path(manifest_hash)
+        if index_path is None:
+            raise FileNotFoundError(f"Missing manifest index for: {manifest_hash}")
+        entry_json = lookup_manifest_index_entry_json(index_path, logical_path)
+        if entry_json is None:
+            return None
+        return ManifestEntry.from_dict(parse_manifest_index_entry_json(entry_json))
+
+    def iter_manifest_entries_for_prefix(
+        self, manifest_hash: str, logical_prefix: str
+    ) -> Iterator[ManifestEntry]:
+        normalized_prefix = logical_prefix.strip("/")
+        index_path = self._cached_manifest_index_path(manifest_hash)
+        if index_path is None:
+            raise FileNotFoundError(f"Missing manifest index for: {manifest_hash}")
+
+        for entry_json in iter_manifest_index_entry_jsons(
+            index_path, normalized_prefix or None
+        ):
+            yield ManifestEntry.from_dict(parse_manifest_index_entry_json(entry_json))
+
     def write_blob_file(
         self,
         blob_hash: str,
@@ -395,7 +508,30 @@ class S3RepositoryStore(RepositoryStore):
             return f"commits/{object_id}.json"
         if kind == "manifest":
             return f"manifests/{object_id}.jsonl"
+        if kind == "manifest-index":
+            return f"manifests/{object_id}.idx"
         return f"refs/heads/{object_id}"
+
+    def _cached_manifest_index_path(self, manifest_hash: str) -> Path | None:
+        cached_path = self._manifest_index_cache.get(manifest_hash)
+        if cached_path is not None and cached_path.exists():
+            return cached_path
+
+        try:
+            response = self.client.get_object(
+                Bucket=self.bucket,
+                Key=self._key("manifest-index", manifest_hash),
+            )
+        except ClientError as error:
+            if self._missing(error):
+                return None
+            raise
+
+        with NamedTemporaryFile(mode="wb", suffix=".idx", delete=False) as temp:
+            temp_path = Path(temp.name)
+            temp.write(response["Body"].read())
+        self._manifest_index_cache[manifest_hash] = temp_path
+        return temp_path
 
     def _lock_key(self, branch: str) -> str:
         suffix = f"locks/refs/heads/{branch}.lock"
@@ -540,3 +676,14 @@ class S3RepositoryStore(RepositoryStore):
     def _precondition_failed(self, error: ClientError) -> bool:
         code = error.response.get("Error", {}).get("Code", "")
         return code in {"PreconditionFailed", "412"}
+
+
+def build_manifest_index_file(
+    manifest_path: str | Path,
+    *,
+    suffix: str = ".idx",
+) -> Path:
+    with NamedTemporaryFile(mode="wb", suffix=suffix, delete=False) as temp:
+        index_path = Path(temp.name)
+    build_manifest_index(manifest_path, index_path)
+    return index_path

@@ -11,6 +11,7 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from pathlib import PurePosixPath
 from tempfile import NamedTemporaryFile
 from typing import Iterator, Literal
 
@@ -25,6 +26,7 @@ from .repository_store import (
     LocalRepositoryStore,
     RepositoryStore,
     S3RepositoryStore,
+    build_manifest_index_file,
 )
 from .repository_support import (
     matches_any_logical_path,
@@ -39,6 +41,7 @@ from .repository_support import (
     relocate_manifest_entry,
 )
 from .storage import iter_s3_objects, open_source_uri, parse_s3_uri
+from .storage import describe_source_uri
 
 
 @dataclass(frozen=True)
@@ -100,17 +103,20 @@ class StageChange:
     path: str
     action: str
     identity_mode: str | None = None
+    source_uri: str | None = None
 
     @staticmethod
     def from_dict(data: dict[str, object]) -> "StageChange":
         action = str(data["action"])
         identity_mode_raw = data.get("identity_mode")
+        source_uri_raw = data.get("source_uri")
         return StageChange(
             path=str(data["path"]),
             action=action,
             identity_mode=(
                 str(identity_mode_raw) if identity_mode_raw is not None else None
             ),
+            source_uri=str(source_uri_raw) if source_uri_raw is not None else None,
         )
 
 
@@ -152,6 +158,8 @@ class FluxelRepository:
         self.layout = initialize_fluxel_layout(root)
         self.store = store or LocalRepositoryStore(self.layout.root)
         self.client_state = client_state or LocalClientState(self.layout.root)
+        self._resolved_ref_cache: dict[str, BranchRefState] = {}
+        self._commit_cache: dict[str, CommitObject] = {}
         self._ensure_head(default_branch="main")
 
     @property
@@ -180,8 +188,17 @@ class FluxelRepository:
         return branch_ref.commit_id
 
     def resolve_ref(self, branch_or_commit: str) -> str:
+        cached_branch_ref = self._resolved_ref_cache.get(branch_or_commit)
+        if cached_branch_ref is not None:
+            current_token = self.store.version_token("ref", branch_or_commit)
+            if current_token == cached_branch_ref.version_token:
+                if not cached_branch_ref.commit_id:
+                    raise ValueError(f"Branch has no commits: {branch_or_commit}")
+                return cached_branch_ref.commit_id
+
         branch_ref = self.store.read_branch_ref(branch_or_commit)
         if branch_ref is not None:
+            self._resolved_ref_cache[branch_or_commit] = branch_ref
             if not branch_ref.commit_id:
                 raise ValueError(f"Branch has no commits: {branch_or_commit}")
             return branch_ref.commit_id
@@ -201,6 +218,7 @@ class FluxelRepository:
             expected_version_token=None,
         ):
             raise ValueError(f"Branch already exists: {name}")
+        self._resolved_ref_cache.pop(name, None)
         return self._branch_path(name)
 
     def merge(self, source_ref: str, target_ref: str) -> MergeResult:
@@ -333,22 +351,26 @@ class FluxelRepository:
         *,
         ref: str | None = None,
         identity_mode: str = "blake3",
+        destination_path: str | None = None,
     ) -> StageStatus:
         if identity_mode not in {"blake3", "meta"}:
             raise ValueError("identity_mode must be one of: blake3, meta")
         branch = ref or self.current_branch()
         self._ensure_branch_exists(branch)
         staged = self._load_stage(branch)
-        for path in paths:
-            normalized = normalize_repository_path(path)
-            source = self.root / normalized
-            if not source.exists() or not source.is_file():
-                raise FileNotFoundError(f"Cannot stage missing file: {normalized}")
-            staged[normalized] = StageChange(
-                path=normalized,
-                action="add",
-                identity_mode=identity_mode,
-            )
+        if destination_path is not None and len(paths) != 1:
+            raise ValueError("--as can only be used when staging exactly one source")
+        for raw_source in paths:
+            for logical_path, source_uri in self._expand_stage_source(
+                raw_source,
+                destination_path=destination_path,
+            ):
+                staged[logical_path] = StageChange(
+                    path=logical_path,
+                    action="add",
+                    identity_mode=identity_mode,
+                    source_uri=source_uri,
+                )
         self._save_stage(branch, staged)
         return self.status(ref=branch)
 
@@ -498,11 +520,14 @@ class FluxelRepository:
         return StageStatus(ref=branch, added=added, removed=removed)
 
     def read_commit(self, commit_id: str) -> CommitObject:
+        cached_commit = self._commit_cache.get(commit_id)
+        if cached_commit is not None:
+            return cached_commit
         commit_payload = self.store.read_commit_bytes(commit_id)
         if commit_payload is None:
             raise ValueError(f"Unknown commit: {commit_id}")
         data = json.loads(commit_payload.decode("utf-8"))
-        return CommitObject(
+        commit = CommitObject(
             id=str(data["id"]),
             message=str(data["message"]),
             manifest=str(data["manifest"]),
@@ -510,6 +535,8 @@ class FluxelRepository:
             created_at=str(data["created_at"]),
             branch=str(data["branch"]),
         )
+        self._commit_cache[commit_id] = commit
+        return commit
 
     def diff(self, from_ref: str, to_ref: str) -> list[DiffEntry]:
         from_commit = self.read_commit(self.resolve_ref(from_ref))
@@ -651,6 +678,7 @@ class FluxelRepository:
         ).encode("utf-8")
         commit_id = blake3(canonical).hexdigest()
         commit_object = CommitObject(id=commit_id, **commit_body)
+        self._commit_cache[commit_id] = commit_object
 
         self.store.write_commit_bytes(
             commit_id,
@@ -691,12 +719,81 @@ class FluxelRepository:
                     index.pop(change.path, None)
                     continue
                 if change.action == "add":
-                    index[change.path] = self._entry_from_working_path(
-                        change.path,
+                    index[change.path] = self._entry_from_stage_change(
+                        change,
                         change.identity_mode or "blake3",
                         store_blob=False,
                     )
         return index
+
+    def resolve_entries_for_prefix(
+        self,
+        ref: str,
+        logical_prefix: str,
+        *,
+        include_staging: bool = False,
+        commit_id: str | None = None,
+    ) -> dict[str, ManifestEntry]:
+        normalized_prefix = logical_prefix.strip("/")
+        resolved_commit_id = commit_id or self.resolve_ref(ref)
+        commit = self.read_commit(resolved_commit_id)
+
+        if not normalized_prefix:
+            index = self._manifest_index(commit.manifest)
+        else:
+            index = {
+                entry.path: entry
+                for entry in self.store.iter_manifest_entries_for_prefix(
+                    commit.manifest,
+                    normalized_prefix,
+                )
+            }
+
+        if include_staging:
+            for change in self._load_stage(ref).values():
+                if normalized_prefix and not _matches_logical_prefix(
+                    change.path,
+                    normalized_prefix,
+                ):
+                    continue
+                if change.action == "remove":
+                    index.pop(change.path, None)
+                    continue
+                if change.action == "add":
+                    index[change.path] = self._entry_from_stage_change(
+                        change,
+                        change.identity_mode or "blake3",
+                        store_blob=False,
+                    )
+        return index
+
+    def resolve_entry(
+        self,
+        ref: str,
+        logical_path: str,
+        *,
+        include_staging: bool = False,
+        commit_id: str | None = None,
+    ) -> ManifestEntry | None:
+        normalized_path = logical_path.strip("/")
+        if not normalized_path:
+            return None
+
+        if include_staging:
+            change = self._load_stage(ref).get(normalized_path)
+            if change is not None:
+                if change.action == "remove":
+                    return None
+                if change.action == "add":
+                    return self._entry_from_stage_change(
+                        change,
+                        change.identity_mode or "blake3",
+                        store_blob=False,
+                    )
+
+        resolved_commit_id = commit_id or self.resolve_ref(ref)
+        commit = self.read_commit(resolved_commit_id)
+        return self.store.lookup_manifest_entry(commit.manifest, normalized_path)
 
     def _materialize_blobs_and_entries(
         self, *, identity_mode: str
@@ -797,6 +894,198 @@ class FluxelRepository:
             source_uri=source_uri,
         )
 
+    def _entry_from_stage_change(
+        self,
+        change: StageChange,
+        identity_mode: str,
+        *,
+        store_blob: bool,
+    ) -> ManifestEntry:
+        if change.source_uri is not None:
+            return self._entry_from_source_uri(
+                logical_path=change.path,
+                source_uri=change.source_uri,
+                identity_mode=identity_mode,
+                store_blob=store_blob,
+            )
+        return self._entry_from_working_path(
+            change.path,
+            identity_mode,
+            store_blob=store_blob,
+        )
+
+    def _entry_from_source_uri(
+        self,
+        *,
+        logical_path: str,
+        source_uri: str,
+        identity_mode: str,
+        store_blob: bool,
+    ) -> ManifestEntry:
+        metadata = describe_source_uri(source_uri)
+        if identity_mode == "blake3":
+            identity_value = self._store_blob_from_source_uri(source_uri)
+            blob_hash = identity_value if store_blob else None
+        elif identity_mode == "meta":
+            identity_value = metadata_identity(logical_path, metadata.size)
+            blob_hash = None
+        else:
+            raise ValueError("identity_mode must be one of: blake3, meta")
+        return ManifestEntry(
+            path=logical_path,
+            hash=identity_value,
+            size=metadata.size,
+            mtime_ns=metadata.mtime_ns,
+            identity_mode=identity_mode,
+            identity_value=identity_value,
+            blob_hash=blob_hash,
+            source_uri=metadata.source_uri,
+        )
+
+    def _expand_stage_source(
+        self,
+        raw_source: str,
+        *,
+        destination_path: str | None,
+    ) -> list[tuple[str, str]]:
+        if raw_source.startswith("s3://"):
+            return self._expand_s3_stage_source(
+                raw_source,
+                destination_path=destination_path,
+            )
+
+        return self._expand_local_stage_source(
+            raw_source,
+            destination_path=destination_path,
+        )
+
+    def _expand_local_stage_source(
+        self,
+        raw_source: str,
+        *,
+        destination_path: str | None,
+    ) -> list[tuple[str, str]]:
+        raw_path = Path(raw_source).expanduser()
+        source_path = (
+            raw_path.resolve()
+            if raw_path.is_absolute()
+            else (self.root / raw_path).resolve()
+        )
+        if not source_path.exists():
+            raise FileNotFoundError(f"Cannot stage missing path: {raw_source}")
+
+        if source_path.is_file():
+            logical_path = self._single_local_logical_path(
+                source_path,
+                destination_path=destination_path,
+            )
+            return [(logical_path, source_path.as_uri())]
+
+        if not source_path.is_dir():
+            raise FileNotFoundError(f"Cannot stage unsupported path: {raw_source}")
+
+        repo_relative_dir: str | None
+        try:
+            repo_relative_dir = normalize_repository_path(
+                source_path.relative_to(self.root).as_posix()
+            )
+        except ValueError:
+            repo_relative_dir = None
+
+        destination_prefix = (
+            normalize_repository_path(destination_path)
+            if destination_path is not None
+            else repo_relative_dir or normalize_repository_path(source_path.name)
+        )
+
+        staged_entries: list[tuple[str, str]] = []
+        for file_path in walk_files(source_path):
+            relative_suffix = file_path.relative_to(source_path).as_posix()
+            logical_path = normalize_repository_path(
+                PurePosixPath(destination_prefix, relative_suffix).as_posix()
+            )
+            staged_entries.append((logical_path, file_path.as_uri()))
+
+        if not staged_entries:
+            raise FileNotFoundError(f"Cannot stage empty directory: {raw_source}")
+        return staged_entries
+
+    def _single_local_logical_path(
+        self,
+        source_path: Path,
+        *,
+        destination_path: str | None,
+    ) -> str:
+        if destination_path is not None:
+            return normalize_repository_path(destination_path)
+        try:
+            return normalize_repository_path(
+                source_path.relative_to(self.root).as_posix()
+            )
+        except ValueError:
+            return normalize_repository_path(source_path.name)
+
+    def _expand_s3_stage_source(
+        self,
+        raw_source: str,
+        *,
+        destination_path: str | None,
+    ) -> list[tuple[str, str]]:
+        bucket, key = parse_s3_uri(raw_source)
+        normalized_key = key.strip("/")
+        if not normalized_key:
+            raise ValueError(f"S3 source cannot be bucket root: {raw_source}")
+
+        objects = list(iter_s3_objects(raw_source))
+        if not objects:
+            raise FileNotFoundError(f"Cannot stage missing S3 path: {raw_source}")
+
+        exact_object_uri = f"s3://{bucket}/{normalized_key}"
+        exact_object_matches = [
+            obj for obj in objects if obj.source_uri == exact_object_uri
+        ]
+        is_single_object = len(exact_object_matches) == 1 and len(objects) == 1
+
+        if is_single_object:
+            logical_path = (
+                normalize_repository_path(destination_path)
+                if destination_path is not None
+                else normalize_repository_path(PurePosixPath(normalized_key).name)
+            )
+            return [(logical_path, exact_object_uri)]
+
+        prefix = normalized_key
+        destination_prefix = (
+            normalize_repository_path(destination_path)
+            if destination_path is not None
+            else normalize_repository_path(PurePosixPath(prefix).name)
+        )
+
+        staged_entries: list[tuple[str, str]] = []
+        for obj in objects:
+            relative_path = normalize_s3_import_path(
+                key=obj.key,
+                prefix=prefix,
+                size=obj.size,
+            )
+            if relative_path is None:
+                continue
+            logical_path = normalize_repository_path(
+                PurePosixPath(destination_prefix, relative_path).as_posix()
+            )
+            staged_entries.append((logical_path, obj.source_uri))
+
+        if not staged_entries and exact_object_matches:
+            logical_path = (
+                normalize_repository_path(destination_path)
+                if destination_path is not None
+                else normalize_repository_path(PurePosixPath(normalized_key).name)
+            )
+            return [(logical_path, exact_object_uri)]
+        if not staged_entries:
+            raise FileNotFoundError(f"Cannot stage empty S3 prefix: {raw_source}")
+        return staged_entries
+
     def _load_stage(self, branch: str) -> dict[str, StageChange]:
         stage_payload = self.client_state.read_staging_payload(branch)
         if stage_payload is None:
@@ -821,6 +1110,7 @@ class FluxelRepository:
                 "path": change.path,
                 "action": change.action,
                 "identity_mode": change.identity_mode,
+                "source_uri": change.source_uri,
             }
             for change in sorted(staged.values(), key=lambda item: item.path)
         ]
@@ -882,6 +1172,7 @@ class FluxelRepository:
         ).encode("utf-8")
         commit_id = blake3(canonical).hexdigest()
         commit_object = CommitObject(id=commit_id, **commit_body)
+        self._commit_cache[commit_id] = commit_object
         self.store.write_commit_bytes(
             commit_id,
             (json.dumps(asdict(commit_object), indent=2, sort_keys=True) + "\n").encode(
@@ -915,8 +1206,8 @@ class FluxelRepository:
                 index.pop(change.path, None)
                 continue
             if change.action == "add":
-                index[change.path] = self._entry_from_working_path(
-                    change.path,
+                index[change.path] = self._entry_from_stage_change(
+                    change,
                     change.identity_mode or "blake3",
                     store_blob=True,
                 )
@@ -968,10 +1259,26 @@ class FluxelRepository:
         return self.store.read_blob_bytes(blob_hash)
 
     def _persist_manifest(self, temp_manifest: Path, manifest_hash: str) -> None:
-        if self.store.object_exists("manifest", manifest_hash):
+        temp_index = self._write_temp_manifest_index(temp_manifest)
+        try:
+            if self.store.object_exists("manifest", manifest_hash):
+                temp_manifest.unlink(missing_ok=True)
+            else:
+                self.store.write_manifest_file(
+                    manifest_hash, temp_manifest, if_missing=True
+                )
+
+            if self.store.object_exists("manifest-index", manifest_hash):
+                temp_index.unlink(missing_ok=True)
+            else:
+                self.store.write_manifest_index_file(
+                    manifest_hash,
+                    temp_index,
+                    if_missing=True,
+                )
+        finally:
             temp_manifest.unlink(missing_ok=True)
-            return
-        self.store.write_manifest_file(manifest_hash, temp_manifest, if_missing=True)
+            temp_index.unlink(missing_ok=True)
 
     def _update_branch_ref(
         self,
@@ -988,6 +1295,10 @@ class FluxelRepository:
             expected_version_token=expected_version_token,
         )
         if updated:
+            self._resolved_ref_cache.pop(branch, None)
+            current_state = self.store.read_branch_ref(branch)
+            if current_state is not None:
+                self._resolved_ref_cache[branch] = current_state
             return
         current_state = self.store.read_branch_ref(branch)
         raise RefConflictError(
@@ -1006,10 +1317,21 @@ class FluxelRepository:
         writer.write_entries(entries)
         return temp_path
 
+    def _write_temp_manifest_index(self, manifest_path: Path) -> Path:
+        return build_manifest_index_file(manifest_path)
+
 
 def _default_remote_client_root(worktree_root: Path, repo_uri: str) -> Path:
     repo_id = blake3(repo_uri.encode("utf-8")).hexdigest()[:16]
     return worktree_root / ".fluxel" / "clients" / repo_id
+
+
+def _matches_logical_prefix(path: str, logical_prefix: str) -> bool:
+    return path == logical_prefix or path.startswith(f"{logical_prefix}/")
+
+
+def _matches_logical_prefix(path: str, logical_prefix: str) -> bool:
+    return path == logical_prefix or path.startswith(f"{logical_prefix}/")
 
 
 def open_repository(
@@ -1096,8 +1418,14 @@ def add(
     *,
     ref: str | None = None,
     identity_mode: str = "blake3",
+    destination_path: str | None = None,
 ) -> StageStatus:
-    return open_repository(root).add(paths, ref=ref, identity_mode=identity_mode)
+    return open_repository(root).add(
+        paths,
+        ref=ref,
+        identity_mode=identity_mode,
+        destination_path=destination_path,
+    )
 
 
 def rm(root: str | Path, paths: list[str], *, ref: str | None = None) -> StageStatus:

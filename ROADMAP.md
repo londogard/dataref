@@ -158,7 +158,7 @@ Deliverables:
 
 - repository URI parsing
 - backend selection based on repo location
-- migration of existing commands from `--root` semantics to repository-aware semantics
+- migration of existing commands to repository-aware `--repo` semantics
 
 Acceptance criteria:
 

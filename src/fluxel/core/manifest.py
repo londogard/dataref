@@ -10,10 +10,44 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass
+from json import JSONDecodeError
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Callable, Iterable, Iterator
 
 from .hashing import blake3_digest_file
+
+
+SUPPORTED_IDENTITY_MODES = frozenset({"blake3", "meta"})
+_BLAKE3_HEX_LENGTH = 64
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _is_hex_digest(value: str) -> bool:
+    normalized = value.lower()
+    return len(normalized) == _BLAKE3_HEX_LENGTH and all(
+        character in _HEX_DIGITS for character in normalized
+    )
+
+
+def _validate_manifest_path(path: str) -> None:
+    if not path:
+        raise ValueError("Manifest entry path cannot be empty")
+    if path.startswith("/") or path.endswith("/"):
+        raise ValueError("Manifest entry path must be a normalized relative path")
+    if "\\" in path or "//" in path:
+        raise ValueError("Manifest entry path must use normalized POSIX separators")
+
+    parts = PurePosixPath(path).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("Manifest entry path must be a normalized relative path")
+
+
+def _validate_hex_digest(value: str, *, field_name: str) -> None:
+    if not _is_hex_digest(value):
+        raise ValueError(
+            f"Manifest entry {field_name} must be a 64-character hex digest"
+        )
 
 
 @dataclass(frozen=True)
@@ -27,8 +61,52 @@ class ManifestEntry:
     blob_hash: str | None = None
     source_uri: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.identity_value is None:
+            object.__setattr__(self, "identity_value", self.hash)
+
+        _validate_manifest_path(self.path)
+        _validate_hex_digest(self.hash, field_name="hash")
+
+        identity_value = self.identity_value
+        if identity_value is None:
+            raise ValueError("Manifest entry identity_value cannot be empty")
+        _validate_hex_digest(identity_value, field_name="identity_value")
+
+        if self.identity_mode not in SUPPORTED_IDENTITY_MODES:
+            supported_modes = ", ".join(sorted(SUPPORTED_IDENTITY_MODES))
+            raise ValueError(
+                f"Manifest entry identity_mode must be one of: {supported_modes}"
+            )
+        if self.size < 0:
+            raise ValueError("Manifest entry size cannot be negative")
+        if self.mtime_ns < 0:
+            raise ValueError("Manifest entry mtime_ns cannot be negative")
+        if identity_value != self.hash:
+            raise ValueError("Manifest entry identity_value must match hash")
+
+        if self.blob_hash is not None:
+            _validate_hex_digest(self.blob_hash, field_name="blob_hash")
+
+        if self.source_uri is not None and not self.source_uri.strip():
+            raise ValueError("Manifest entry source_uri cannot be empty")
+
+        if self.identity_mode == "meta":
+            if self.blob_hash is not None:
+                raise ValueError(
+                    "Metadata-only manifest entries cannot include blob_hash"
+                )
+            if self.source_uri is None:
+                raise ValueError(
+                    "Metadata-only manifest entries must include source_uri"
+                )
+        elif self.blob_hash is not None and self.blob_hash != self.hash:
+            raise ValueError("Blob-backed manifest entries must keep blob_hash aligned")
+
     @staticmethod
     def from_dict(data: dict[str, object]) -> "ManifestEntry":
+        if not isinstance(data, dict):
+            raise ValueError("Manifest entry payload must be an object")
         hash_value = str(data.get("hash") or data.get("identity_value") or "")
         if not hash_value:
             raise ValueError("Manifest entry must include hash or identity_value")
@@ -38,11 +116,25 @@ class ManifestEntry:
         if blob_hash is None and "blob_hash" not in data and identity_mode == "blake3":
             blob_hash = hash_value
         source_uri = data.get("source_uri")
+
+        try:
+            path = str(data["path"])
+            size = int(data["size"])
+            mtime_ns = int(data["mtime_ns"])
+        except KeyError as error:
+            raise ValueError(
+                f"Manifest entry is missing required field: {error.args[0]}"
+            ) from error
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "Manifest entry size and mtime_ns must be integers"
+            ) from error
+
         return ManifestEntry(
-            path=str(data["path"]),
+            path=path,
             hash=hash_value,
-            size=int(data["size"]),
-            mtime_ns=int(data["mtime_ns"]),
+            size=size,
+            mtime_ns=mtime_ns,
             identity_mode=identity_mode,
             identity_value=(
                 str(identity_value) if identity_value is not None else hash_value
@@ -87,11 +179,22 @@ class ManifestReader:
         if not self.manifest_path.exists():
             return
         with self.manifest_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
+            for line_number, line in enumerate(handle, start=1):
                 line = line.strip()
                 if not line:
                     continue
-                yield ManifestEntry.from_dict(json.loads(line))
+                try:
+                    payload = json.loads(line)
+                except JSONDecodeError as error:
+                    raise ValueError(
+                        f"Corrupt manifest JSON at line {line_number} in {self.manifest_path}"
+                    ) from error
+                try:
+                    yield ManifestEntry.from_dict(payload)
+                except ValueError as error:
+                    raise ValueError(
+                        f"Invalid manifest entry at line {line_number} in {self.manifest_path}: {error}"
+                    ) from error
 
     def get_entry(self, logical_path: str) -> ManifestEntry | None:
         match: ManifestEntry | None = None

@@ -4,6 +4,7 @@ import tracemalloc
 from pathlib import Path
 
 from blake3 import blake3
+import pytest
 
 from fluxel.core import (
     FluxelFileSystem,
@@ -16,6 +17,7 @@ from fluxel.core import (
     RefConflictError,
     build_analytical_index,
     drop_analytical_index,
+    open_repository,
     query_analytical_index,
 )
 
@@ -162,6 +164,89 @@ def test_memory_safe_manifesting_100k_entries(tmp_path: Path) -> None:
     assert sum(1 for _ in ManifestReader(manifest_path).iter_entries()) == entry_count
 
 
+def test_manifest_entry_validation_rejects_invalid_payloads() -> None:
+    invalid_payloads = [
+        (
+            {
+                "path": "../escape.txt",
+                "hash": "a" * 64,
+                "size": 1,
+                "mtime_ns": 1,
+            },
+            "normalized relative path",
+        ),
+        (
+            {
+                "path": "valid.txt",
+                "hash": "g" * 64,
+                "size": 1,
+                "mtime_ns": 1,
+            },
+            "64-character hex digest",
+        ),
+        (
+            {
+                "path": "valid.txt",
+                "hash": "a" * 64,
+                "size": -1,
+                "mtime_ns": 1,
+            },
+            "size cannot be negative",
+        ),
+        (
+            {
+                "path": "meta.txt",
+                "hash": "a" * 64,
+                "size": 1,
+                "mtime_ns": 1,
+                "identity_mode": "meta",
+            },
+            "must include source_uri",
+        ),
+    ]
+
+    for payload, message in invalid_payloads:
+        with pytest.raises(ValueError, match=message):
+            ManifestEntry.from_dict(payload)
+
+
+def test_manifest_reader_reports_corrupt_json_with_line_context(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "broken.jsonl"
+    manifest_path.write_text(
+        '{"path":"ok.txt","hash":"' + ("a" * 64) + '","size":1,"mtime_ns":1}\n'
+        '{"path": invalid json}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"Corrupt manifest JSON at line 2"):
+        list(ManifestReader(manifest_path).iter_entries())
+
+
+def test_local_client_state_writes_use_atomic_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = LocalClientState(tmp_path)
+    replaced_targets: list[Path] = []
+    original_replace = Path.replace
+
+    def tracking_replace(path: Path, target: str | Path) -> Path:
+        replaced_targets.append(Path(target))
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", tracking_replace)
+
+    state.set_current_branch("feature")
+    state.write_staging_payload("feature", '[{"path":"a.txt","action":"add"}]\n')
+
+    assert state.current_branch() == "feature"
+    assert state.read_staging_payload("feature") == '[{"path":"a.txt","action":"add"}]\n'
+    assert state.head_path() in replaced_targets
+    assert state.stage_path("feature") in replaced_targets
+    assert not list(state.fluxel_dir.rglob("*.tmp"))
+
+
 def test_uri_routing_reads_expected_blob_bytes(tmp_path: Path) -> None:
     dataset_root = tmp_path / "my_data"
     dataset_root.mkdir(parents=True)
@@ -173,6 +258,178 @@ def test_uri_routing_reads_expected_blob_bytes(tmp_path: Path) -> None:
     fs = FluxelFileSystem(dataset_roots={"my_data": dataset_root})
     with fs.open("fluxel://my_data@main/test.csv", "rb") as handle:
         assert handle.read() == b"col\n123\n"
+
+
+def test_exact_lookup_uses_manifest_sidecar_without_full_scan(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("alpha")
+    repo = FluxelRepository(tmp_path)
+    repo.commit("initial")
+
+    manifest_indexes = list((tmp_path / ".fluxel" / "manifests").glob("*.idx"))
+    assert len(manifest_indexes) == 1
+
+    original_iter_manifest_entries = repo.store.iter_manifest_entries
+
+    def fail_iter_manifest_entries(manifest_hash: str):
+        raise AssertionError(f"unexpected full manifest scan for {manifest_hash}")
+
+    repo.store.iter_manifest_entries = fail_iter_manifest_entries  # type: ignore[method-assign]
+    try:
+        entry = repo.resolve_entry("main", "a.txt")
+    finally:
+        repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
+
+    assert entry is not None
+    assert entry.path == "a.txt"
+
+
+def test_uri_routing_uses_manifest_sidecar_for_point_reads(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "sidecar_data"
+    dataset_root.mkdir(parents=True)
+    (dataset_root / "test.csv").write_text("value\n7\n")
+
+    repo = FluxelRepository(dataset_root)
+    repo.commit("add file")
+
+    fs = FluxelFileSystem(dataset_roots={"sidecar_data": dataset_root})
+    cached_repo = fs._repository(dataset_root)
+    original_iter_manifest_entries = cached_repo.store.iter_manifest_entries
+
+    def fail_iter_manifest_entries(manifest_hash: str):
+        raise AssertionError(f"unexpected full manifest scan for {manifest_hash}")
+
+    cached_repo.store.iter_manifest_entries = fail_iter_manifest_entries  # type: ignore[method-assign]
+    try:
+        with fs.open("fluxel://sidecar_data@main/test.csv", "rb") as handle:
+            assert handle.read() == b"value\n7\n"
+    finally:
+        cached_repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
+
+
+def test_uri_listing_uses_manifest_sidecar_for_prefix_reads(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "listing_data"
+    dataset_root.mkdir(parents=True)
+    (dataset_root / "logs").mkdir()
+    (dataset_root / "logs" / "a.txt").write_text("a")
+    (dataset_root / "logs" / "b.txt").write_text("b")
+    (dataset_root / "other.txt").write_text("c")
+
+    repo = FluxelRepository(dataset_root)
+    repo.commit("add files")
+
+    fs = FluxelFileSystem(dataset_roots={"listing_data": dataset_root})
+    cached_repo = fs._repository(dataset_root)
+    original_iter_manifest_entries = cached_repo.store.iter_manifest_entries
+
+    def fail_iter_manifest_entries(manifest_hash: str):
+        raise AssertionError(f"unexpected full manifest scan for {manifest_hash}")
+
+    cached_repo.store.iter_manifest_entries = fail_iter_manifest_entries  # type: ignore[method-assign]
+    try:
+        paths = fs.ls("fluxel://listing_data@main/logs", detail=False)
+    finally:
+        cached_repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
+
+    assert paths == [
+        "fluxel://listing_data@main/logs/a.txt",
+        "fluxel://listing_data@main/logs/b.txt",
+    ]
+
+
+def test_repeated_exact_lookup_reuses_cached_commit(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("alpha")
+    repo = FluxelRepository(tmp_path)
+    repo.commit("initial")
+
+    first = repo.resolve_entry("main", "a.txt")
+    assert first is not None
+
+    original_read_commit_bytes = repo.store.read_commit_bytes
+
+    def fail_read_commit_bytes(commit_id: str):
+        raise AssertionError(f"unexpected commit reread for {commit_id}")
+
+    repo.store.read_commit_bytes = fail_read_commit_bytes  # type: ignore[method-assign]
+    try:
+        second = repo.resolve_entry("main", "a.txt")
+    finally:
+        repo.store.read_commit_bytes = original_read_commit_bytes  # type: ignore[method-assign]
+
+    assert second is not None
+    assert second.path == "a.txt"
+
+
+def test_remote_exact_lookup_uses_manifest_sidecar(
+    tmp_path: Path, fake_s3_installer
+) -> None:
+    client = fake_s3_installer({})
+    worktree = tmp_path / "worktree"
+    client_root = tmp_path / "client"
+    worktree.mkdir(parents=True)
+    client_root.mkdir(parents=True)
+    (worktree / "remote.txt").write_text("payload")
+
+    repo = open_repository(
+        "s3://demo-bucket/repos/demo",
+        worktree=worktree,
+        client_root=client_root,
+        s3_client=client,
+    )
+    repo.commit("initial")
+
+    assert any(
+        key.startswith("repos/demo/manifests/") and key.endswith(".idx")
+        for key in client._objects
+    )
+
+    original_iter_manifest_entries = repo.store.iter_manifest_entries
+
+    def fail_iter_manifest_entries(manifest_hash: str):
+        raise AssertionError(f"unexpected full manifest scan for {manifest_hash}")
+
+    repo.store.iter_manifest_entries = fail_iter_manifest_entries  # type: ignore[method-assign]
+    try:
+        entry = repo.resolve_entry("main", "remote.txt")
+    finally:
+        repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
+
+    assert entry is not None
+    assert entry.path == "remote.txt"
+
+
+def test_remote_prefix_listing_uses_manifest_sidecar(
+    tmp_path: Path, fake_s3_installer
+) -> None:
+    client = fake_s3_installer({})
+    worktree = tmp_path / "worktree-list"
+    client_root = tmp_path / "client-list"
+    worktree.mkdir(parents=True)
+    client_root.mkdir(parents=True)
+    (worktree / "logs").mkdir()
+    (worktree / "logs" / "a.txt").write_text("a")
+    (worktree / "logs" / "b.txt").write_text("b")
+    (worktree / "other.txt").write_text("c")
+
+    repo = open_repository(
+        "s3://demo-bucket/repos/demo-prefix",
+        worktree=worktree,
+        client_root=client_root,
+        s3_client=client,
+    )
+    repo.commit("initial")
+
+    original_iter_manifest_entries = repo.store.iter_manifest_entries
+
+    def fail_iter_manifest_entries(manifest_hash: str):
+        raise AssertionError(f"unexpected full manifest scan for {manifest_hash}")
+
+    repo.store.iter_manifest_entries = fail_iter_manifest_entries  # type: ignore[method-assign]
+    try:
+        entries = repo.resolve_entries_for_prefix("main", "logs")
+    finally:
+        repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
+
+    assert sorted(entries) == ["logs/a.txt", "logs/b.txt"]
 
 
 def test_disposable_analytical_index(tmp_path: Path) -> None:

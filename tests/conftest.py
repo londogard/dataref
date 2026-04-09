@@ -52,13 +52,27 @@ class FakeS3Client:
         assert operation_name == "list_objects_v2"
         return FakeS3Paginator(self._objects)
 
-    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+    def get_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Range: str | None = None,
+    ) -> dict[str, object]:
         assert Bucket == "demo-bucket"
         metadata = self._objects.get(Key)
         if metadata is None:
             raise self._client_error("NoSuchKey")
+        payload = metadata["Body"]
+        if Range is not None:
+            prefix, byte_range = Range.split("=", maxsplit=1)
+            assert prefix == "bytes"
+            start_raw, end_raw = byte_range.split("-", maxsplit=1)
+            start = int(start_raw)
+            end = int(end_raw)
+            payload = payload[start : end + 1]
         return {
-            "Body": FakeStreamingBody(metadata["Body"]),
+            "Body": FakeStreamingBody(payload),
             "ETag": metadata["ETag"],
             "LastModified": metadata["LastModified"],
         }
@@ -91,6 +105,7 @@ class FakeS3Client:
         if metadata is None:
             raise self._client_error("404")
         return {
+            "ContentLength": len(metadata["Body"]),
             "ETag": metadata["ETag"],
             "LastModified": metadata["LastModified"],
         }

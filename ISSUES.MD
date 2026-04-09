@@ -87,7 +87,7 @@ Implement `fluxel log` using commit parent links only.
 - Optional JSON output mode.
 
 **Acceptance Criteria**
-- `fluxel log --root <root> main` prints deterministic history.
+- `fluxel log --repo <repo> main` prints deterministic history.
 - No blob reads occur during history traversal.
 - Unit tests cover empty/single/multi-commit chains.
 

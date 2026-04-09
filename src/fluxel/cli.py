@@ -5,6 +5,7 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
+from botocore.exceptions import BotoCoreError, ClientError
 from simple_parsing import ArgumentParser
 from simple_parsing.helpers import field, flag, subparsers
 
@@ -28,6 +29,15 @@ from .core import (
 
 
 IdentityMode = Literal["blake3", "meta"]
+HANDLED_CLI_ERRORS = (
+    BotoCoreError,
+    ClientError,
+    FileNotFoundError,
+    OSError,
+    PermissionError,
+    RefConflictError,
+    ValueError,
+)
 
 
 @dataclass
@@ -38,7 +48,7 @@ class CommitArgs:
     )
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
     staged: bool = flag(
@@ -65,7 +75,7 @@ class ImportArgs:
     )
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
     ref: str | None = None  # Branch ref to update (defaults to current branch)
@@ -73,11 +83,18 @@ class ImportArgs:
 
 @dataclass
 class AddArgs:
-    paths: list[str] = field(positional=True, nargs="+", help="Paths to stage")
+    paths: list[str] = field(
+        positional=True, nargs="+", help="Files, directories, or S3 paths to stage"
+    )
     identity: IdentityMode = "blake3"  # Identity strategy for staged additions
+    destination_path: str | None = field(
+        default=None,
+        alias="--as",
+        help="Logical destination path for a single staged source",
+    )
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
     ref: str | None = field(
@@ -96,7 +113,7 @@ class RmArgs:
     )
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
     ref: str | None = field(
@@ -119,7 +136,7 @@ class MoveArgs:
     message: str = field(alias=["-m", "--message"], help="Commit message")
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
     ref: str | None = field(
@@ -132,7 +149,7 @@ class MoveArgs:
 class StatusArgs:
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
     ref: str | None = field(
@@ -146,7 +163,7 @@ class BranchArgs:
     name: str = field(positional=True, help="Branch name")
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
 
@@ -157,7 +174,7 @@ class DiffArgs:
     to_ref: str = field(positional=True, help="Target ref (branch or commit)")
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
 
@@ -168,7 +185,7 @@ class MergeArgs:
     target_ref: str = field(positional=True, help="Branch ref to fast-forward")
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
 
@@ -177,7 +194,7 @@ class MergeArgs:
 class VerifyArgs:
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
     ref: str = "main"  # Branch ref to verify
@@ -198,7 +215,7 @@ class VerifyArgs:
 class IndexBuildArgs:
     root: str = field(
         default=".",
-        alias=["--repo", "--root"],
+        alias="--repo",
         help="Repository path or URI",
     )
     ref: str = "main"  # Ref to index
@@ -292,34 +309,47 @@ def _flatten_option_values(values: list[object]) -> list[str]:
     return flattened
 
 
-def _normalize_global_repo_option(argv: list[str]) -> list[str]:
-    if not argv:
-        return argv
-
-    tokens = list(argv)
-    if tokens[0] not in {"--repo", "--root"}:
-        return tokens
-    if len(tokens) < 3:
-        return tokens
-
-    repo_flag = tokens[0]
-    repo_value = tokens[1]
-    command = tokens[2]
-
-    if command == "index" and len(tokens) >= 4 and tokens[3] == "build":
-        return ["index", "build", repo_flag, repo_value, *tokens[4:]]
-
-    return [command, repo_flag, repo_value, *tokens[3:]]
+def _command_name(command: object) -> str:
+    if isinstance(command, CommitArgs):
+        return "commit"
+    if isinstance(command, ImportArgs):
+        return "import"
+    if isinstance(command, AddArgs):
+        return "add"
+    if isinstance(command, RmArgs):
+        return "rm"
+    if isinstance(command, MoveArgs):
+        return "mv"
+    if isinstance(command, StatusArgs):
+        return "status"
+    if isinstance(command, BranchArgs):
+        return "branch"
+    if isinstance(command, DiffArgs):
+        return "diff"
+    if isinstance(command, MergeArgs):
+        return "merge"
+    if isinstance(command, VerifyArgs):
+        return "verify"
+    if isinstance(command, IndexArgs):
+        if isinstance(command.command, IndexBuildArgs):
+            return "index build"
+        if isinstance(command.command, IndexQueryArgs):
+            return "index query"
+        if isinstance(command.command, IndexDropArgs):
+            return "index drop"
+        return "index"
+    return "fluxel"
 
 
 def run_cli(argv: list[str] | None = None) -> int:
-    argv = _normalize_global_repo_option(argv or sys.argv[1:])
+    argv = argv or sys.argv[1:]
     parser = build_parser()
     args = parser.parse_args(argv).cli
     command = args.command
+    command_name = _command_name(command)
 
-    if isinstance(command, CommitArgs):
-        try:
+    try:
+        if isinstance(command, CommitArgs):
             commit_id = commit(
                 command.root,
                 command.message,
@@ -327,14 +357,10 @@ def run_cli(argv: list[str] | None = None) -> int:
                 staged=command.staged,
                 ref=command.ref,
             )
-        except RefConflictError as error:
-            print(f"commit error: {error}", file=sys.stderr)
-            return 2
-        print(commit_id)
-        return 0
+            print(commit_id)
+            return 0
 
-    if isinstance(command, ImportArgs):
-        try:
+        if isinstance(command, ImportArgs):
             commit_id = import_s3(
                 command.root,
                 command.source,
@@ -343,58 +369,51 @@ def run_cli(argv: list[str] | None = None) -> int:
                 path_patterns=_flatten_option_values(command.path_patterns),
                 ref=command.ref,
             )
-        except RefConflictError as error:
-            print(f"commit error: {error}", file=sys.stderr)
-            return 2
-        print(commit_id)
-        return 0
+            print(commit_id)
+            return 0
 
-    if isinstance(command, AddArgs):
-        stage = add(
-            root=command.root,
-            paths=command.paths,
-            ref=command.ref,
-            identity_mode=command.identity,
-        )
-        print(json.dumps(_stage_payload(stage), indent=2))
-        return 0
-
-    if isinstance(command, RmArgs):
-        if command.message is not None and command.staged:
-            print(
-                "rm error: cannot combine --message with --staged",
-                file=sys.stderr,
+        if isinstance(command, AddArgs):
+            stage = add(
+                root=command.root,
+                paths=command.paths,
+                ref=command.ref,
+                identity_mode=command.identity,
+                destination_path=command.destination_path,
             )
-            return 2
-        if command.message is not None:
-            try:
+            print(json.dumps(_stage_payload(stage), indent=2))
+            return 0
+
+        if isinstance(command, RmArgs):
+            if command.message is not None and command.staged:
+                print(
+                    "rm error: cannot combine --message with --staged",
+                    file=sys.stderr,
+                )
+                return 2
+            if command.message is not None:
                 result = remove(
                     root=command.root,
                     paths=command.paths,
                     message=command.message,
                     ref=command.ref,
                 )
-            except (FileNotFoundError, RefConflictError, ValueError) as error:
-                print(f"rm error: {error}", file=sys.stderr)
-                return 2
-            print(
-                json.dumps(
-                    {
-                        "ref": result.ref,
-                        "commit_id": result.commit_id,
-                        "removed_paths": result.removed_paths,
-                    },
-                    indent=2,
+                print(
+                    json.dumps(
+                        {
+                            "ref": result.ref,
+                            "commit_id": result.commit_id,
+                            "removed_paths": result.removed_paths,
+                        },
+                        indent=2,
+                    )
                 )
-            )
+                return 0
+
+            stage = rm(root=command.root, paths=command.paths, ref=command.ref)
+            print(json.dumps(_stage_payload(stage), indent=2))
             return 0
 
-        stage = rm(root=command.root, paths=command.paths, ref=command.ref)
-        print(json.dumps(_stage_payload(stage), indent=2))
-        return 0
-
-    if isinstance(command, MoveArgs):
-        try:
+        if isinstance(command, MoveArgs):
             result = move(
                 root=command.root,
                 source_path=command.source_path,
@@ -402,130 +421,131 @@ def run_cli(argv: list[str] | None = None) -> int:
                 message=command.message,
                 ref=command.ref,
             )
-        except (FileNotFoundError, RefConflictError, ValueError) as error:
-            print(f"mv error: {error}", file=sys.stderr)
-            return 2
-        print(
-            json.dumps(
-                {
-                    "ref": result.ref,
-                    "commit_id": result.commit_id,
-                    "source_path": result.source_path,
-                    "destination_path": result.destination_path,
-                    "moved_paths": result.moved_paths,
-                },
-                indent=2,
+            print(
+                json.dumps(
+                    {
+                        "ref": result.ref,
+                        "commit_id": result.commit_id,
+                        "source_path": result.source_path,
+                        "destination_path": result.destination_path,
+                        "moved_paths": result.moved_paths,
+                    },
+                    indent=2,
+                )
             )
-        )
-        return 0
+            return 0
 
-    if isinstance(command, StatusArgs):
-        stage = status(
-            root=command.root,
-            ref=command.ref,
-        )
-        print(json.dumps(_stage_payload(stage), indent=2))
-        return 0
+        if isinstance(command, StatusArgs):
+            stage = status(
+                root=command.root,
+                ref=command.ref,
+            )
+            print(json.dumps(_stage_payload(stage), indent=2))
+            return 0
 
-    if isinstance(command, BranchArgs):
-        branch_path = branch(command.root, command.name)
-        print(str(branch_path))
-        return 0
+        if isinstance(command, BranchArgs):
+            branch_path = branch(command.root, command.name)
+            print(str(branch_path))
+            return 0
 
-    if isinstance(command, DiffArgs):
-        changes = diff(
-            command.root,
-            command.from_ref,
-            command.to_ref,
-        )
-        payload = [
-            {
-                "path": change.path,
-                "change": change.change,
-                "before_hash": change.before_hash,
-                "after_hash": change.after_hash,
-                "before_size": change.before_size,
-                "after_size": change.after_size,
-            }
-            for change in changes
-        ]
-        print(json.dumps(payload, indent=2))
-        return 0
+        if isinstance(command, DiffArgs):
+            changes = diff(
+                command.root,
+                command.from_ref,
+                command.to_ref,
+            )
+            payload = [
+                {
+                    "path": change.path,
+                    "change": change.change,
+                    "before_hash": change.before_hash,
+                    "after_hash": change.after_hash,
+                    "before_size": change.before_size,
+                    "after_size": change.after_size,
+                }
+                for change in changes
+            ]
+            print(json.dumps(payload, indent=2))
+            return 0
 
-    if isinstance(command, MergeArgs):
-        try:
+        if isinstance(command, MergeArgs):
             result = merge(
                 root=command.root,
                 source_ref=command.source_ref,
                 target_ref=command.target_ref,
             )
-        except (RefConflictError, ValueError) as error:
-            print(f"merge error: {error}", file=sys.stderr)
-            return 2
-        print(
-            json.dumps(
-                {
-                    "source_ref": result.source_ref,
-                    "target_ref": result.target_ref,
-                    "commit_id": result.commit_id,
-                    "updated": result.updated,
-                },
-                indent=2,
+            print(
+                json.dumps(
+                    {
+                        "source_ref": result.source_ref,
+                        "target_ref": result.target_ref,
+                        "commit_id": result.commit_id,
+                        "updated": result.updated,
+                    },
+                    indent=2,
+                )
             )
-        )
-        return 0
+            return 0
 
-    if isinstance(command, VerifyArgs):
-        try:
+        if isinstance(command, VerifyArgs):
             result = verify(
                 root=command.root,
                 ref=command.ref,
                 path_prefixes=_flatten_option_values(command.path),
                 dry_run=command.dry_run,
             )
-        except RefConflictError as error:
-            print(f"verify error: {error}", file=sys.stderr)
-            return 2
-        payload = {
-            "commit_id": result.commit_id,
-            "verified_entries": result.verified_entries,
-            "candidate_entries": result.candidate_entries,
-            "total_entries": result.total_entries,
-            "created_commit": result.created_commit,
-            "dry_run": result.dry_run,
-        }
-        print(json.dumps(payload, indent=2))
-        return 0
-
-    if isinstance(command, IndexArgs):
-        index_command = command.command
-        if isinstance(index_command, IndexBuildArgs):
-            paths = build_analytical_index(
-                root=index_command.root,
-                ref=index_command.ref,
-                output_dir=index_command.output_dir,
-                export_parquet=index_command.parquet,
-            )
-            result = {
-                "database_path": str(paths.database_path),
-                "parquet_path": str(paths.parquet_path) if paths.parquet_path else None,
+            payload = {
+                "commit_id": result.commit_id,
+                "verified_entries": result.verified_entries,
+                "candidate_entries": result.candidate_entries,
+                "total_entries": result.total_entries,
+                "created_commit": result.created_commit,
+                "dry_run": result.dry_run,
             }
-            print(json.dumps(result, indent=2))
+            print(json.dumps(payload, indent=2))
             return 0
 
-        if isinstance(index_command, IndexQueryArgs):
-            rows = query_analytical_index(index_command.db, index_command.sql)
-            print(json.dumps(rows))
-            return 0
+        if isinstance(command, IndexArgs):
+            index_command = command.command
+            if isinstance(index_command, IndexBuildArgs):
+                paths = build_analytical_index(
+                    root=index_command.root,
+                    ref=index_command.ref,
+                    output_dir=index_command.output_dir,
+                    export_parquet=index_command.parquet,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "database_path": str(paths.database_path),
+                            "parquet_path": (
+                                str(paths.parquet_path)
+                                if paths.parquet_path is not None
+                                else None
+                            ),
+                        },
+                        indent=2,
+                    )
+                )
+                return 0
+            if isinstance(index_command, IndexQueryArgs):
+                rows = query_analytical_index(index_command.db, index_command.sql)
+                print(json.dumps(rows, indent=2))
+                return 0
+            if isinstance(index_command, IndexDropArgs):
+                drop_analytical_index(index_command.db)
+                print("ok")
+                return 0
+    except HANDLED_CLI_ERRORS as error:
+        print(f"{command_name} error: {error}", file=sys.stderr)
+        return 2
 
-        if isinstance(index_command, IndexDropArgs):
-            drop_analytical_index(index_command.db)
-            print("ok")
-            return 0
-
-    parser.error("Unsupported command")
-    return 2
+    raise AssertionError(f"Unsupported command type: {type(command).__name__}")
 
 
-def main() -> None:
-    raise SystemExit(run_cli(sys.argv[1:]))
+def main(argv: list[str] | None = None) -> int:
+    return run_cli(argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
