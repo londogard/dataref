@@ -75,9 +75,7 @@ def iter_manifest_index_entry_jsons(
     connection = sqlite3.connect(Path(index_path))
     try:
         if not logical_prefix:
-            cursor = connection.execute(
-                "SELECT entry_json FROM entries ORDER BY path"
-            )
+            cursor = connection.execute("SELECT entry_json FROM entries ORDER BY path")
         else:
             descendant_prefix = f"{logical_prefix.rstrip('/')}/"
             cursor = connection.execute(

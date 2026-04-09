@@ -212,9 +212,7 @@ def test_cli_add_reports_missing_source_cleanly(tmp_path: Path, capsys) -> None:
     assert "add error: Cannot stage missing path: missing.txt" in stderr
 
 
-def test_cli_import_rejects_invalid_path_filter_cleanly(
-    tmp_path: Path, capsys
-) -> None:
+def test_cli_import_rejects_invalid_path_filter_cleanly(tmp_path: Path, capsys) -> None:
     assert (
         run_cli(
             [
@@ -231,7 +229,10 @@ def test_cli_import_rejects_invalid_path_filter_cleanly(
         == 2
     )
     stderr = capsys.readouterr().err
-    assert "import error: Import path filter cannot traverse outside repository root" in stderr
+    assert (
+        "import error: Import path filter cannot traverse outside repository root"
+        in stderr
+    )
 
 
 def test_cli_verify_reports_missing_source_cleanly(tmp_path: Path, capsys) -> None:
