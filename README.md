@@ -200,14 +200,34 @@ uv run fluxel verify --repo /tmp/fluxel-demo --ref main --path images --path roo
 
 Fluxel includes `integration`-marked tests for real S3-compatible behavior. The preferred target is Ministack.
 
-Set these environment variables before running the suite:
+Start Ministack locally:
 
 ```bash
-export FLUXEL_MINISTACK_ENDPOINT=http://127.0.0.1:9000
-export FLUXEL_MINISTACK_ACCESS_KEY=ministack
-export FLUXEL_MINISTACK_SECRET_KEY=ministack123
+docker run --rm -p 4566:4566 nahuelnucera/ministack
+```
+
+If you also want MiniStack features that launch real sidecar containers such as RDS, ECS, or Docker-backed Lambda runtimes, mount the Docker socket:
+
+```bash
+docker run --rm -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock nahuelnucera/ministack
+```
+
+Verify the emulator is ready:
+
+```bash
+curl http://127.0.0.1:4566/_ministack/health
+```
+
+Then set these environment variables before running the suite:
+
+```bash
+export FLUXEL_MINISTACK_ENDPOINT=http://127.0.0.1:4566
+export FLUXEL_MINISTACK_ACCESS_KEY=test
+export FLUXEL_MINISTACK_SECRET_KEY=test
 export FLUXEL_MINISTACK_REGION=us-east-1
 ```
+
+Fluxel's integration fixture already uses path-style boto3 S3 addressing, so no extra S3 client flags are needed.
 
 Then run:
 
@@ -216,6 +236,12 @@ uv run pytest tests/test_s3_integration.py -m integration
 ```
 
 If `FLUXEL_MINISTACK_ENDPOINT` is unset or the endpoint is unreachable, the integration tests skip automatically.
+
+To wipe the local emulator state between runs without restarting the container:
+
+```bash
+curl -X POST http://127.0.0.1:4566/_ministack/reset
+```
 
 ## Merge Command
 
