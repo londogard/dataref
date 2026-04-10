@@ -81,6 +81,7 @@ class RepositoryStore(Protocol):
         commit_id: str | None,
         *,
         expected_version_token: str | None,
+        expected_commit_id: str | None = None,
     ) -> bool: ...
 
     def read_blob_bytes(self, blob_hash: str) -> bytes: ...
@@ -185,9 +186,14 @@ class LocalRepositoryStore(RepositoryStore):
         commit_id: str | None,
         *,
         expected_version_token: str | None,
+        expected_commit_id: str | None = None,
     ) -> bool:
         current_token = self.version_token("ref", branch)
         if current_token != expected_version_token:
+            return False
+        current_state = self.read_branch_ref(branch)
+        current_commit_id = current_state.commit_id if current_state else None
+        if current_commit_id != expected_commit_id:
             return False
         self.write_branch_ref(branch, commit_id)
         return True
@@ -414,6 +420,7 @@ class S3RepositoryStore(RepositoryStore):
         commit_id: str | None,
         *,
         expected_version_token: str | None,
+        expected_commit_id: str | None = None,
     ) -> bool:
         lock_token = str(uuid4())
         if not self._acquire_branch_lock(branch, lock_token):
@@ -422,6 +429,9 @@ class S3RepositoryStore(RepositoryStore):
             current = self.read_branch_ref(branch)
             current_version = current.version_token if current else None
             if current_version != expected_version_token:
+                return False
+            current_commit_id = current.commit_id if current else None
+            if current_commit_id != expected_commit_id:
                 return False
             self.write_branch_ref(branch, commit_id)
             return True

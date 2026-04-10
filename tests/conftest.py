@@ -47,6 +47,7 @@ class FakeS3Paginator:
 class FakeS3Client:
     def __init__(self, objects: dict[str, dict[str, object]]) -> None:
         self._objects = objects
+        self.fixed_etag: str | None = None
 
     def get_paginator(self, operation_name: str) -> FakeS3Paginator:
         assert operation_name == "list_objects_v2"
@@ -116,6 +117,8 @@ class FakeS3Client:
         return {}
 
     def _etag(self, payload: bytes) -> str:
+        if self.fixed_etag is not None:
+            return self.fixed_etag
         return f'"{len(payload):x}-{sum(payload):x}"'
 
     def _client_error(self, code: str) -> ClientError:

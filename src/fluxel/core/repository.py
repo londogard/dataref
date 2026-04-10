@@ -216,8 +216,16 @@ class FluxelRepository:
             name,
             head_commit or None,
             expected_version_token=None,
+            expected_commit_id=None,
         ):
             raise ValueError(f"Branch already exists: {name}")
+        created_state = self.store.read_branch_ref(name)
+        if created_state is not None:
+            self.client_state.write_branch_snapshot(
+                name,
+                commit_id=created_state.commit_id,
+                version_token=created_state.version_token,
+            )
         self._resolved_ref_cache.pop(name, None)
         return self._branch_path(name)
 
@@ -1123,9 +1131,22 @@ class FluxelRepository:
         self._require_branch_state(branch)
 
     def _require_branch_state(self, branch: str) -> BranchRefState:
+        cached_state = self.client_state.read_branch_snapshot(branch)
+        if cached_state is not None:
+            return BranchRefState(
+                branch=branch,
+                commit_id=cached_state.commit_id,
+                version_token=cached_state.version_token,
+            )
+
         branch_state = self.store.read_branch_ref(branch)
         if branch_state is None:
             raise ValueError(f"Unknown branch: {branch}")
+        self.client_state.write_branch_snapshot(
+            branch,
+            commit_id=branch_state.commit_id,
+            version_token=branch_state.version_token,
+        )
         return branch_state
 
     def _require_commit_for_metadata_mutation(self, branch: str) -> CommitObject:
@@ -1293,14 +1314,26 @@ class FluxelRepository:
             branch,
             commit_id,
             expected_version_token=expected_version_token,
+            expected_commit_id=expected_commit_id,
         )
         if updated:
             self._resolved_ref_cache.pop(branch, None)
             current_state = self.store.read_branch_ref(branch)
             if current_state is not None:
                 self._resolved_ref_cache[branch] = current_state
+                self.client_state.write_branch_snapshot(
+                    branch,
+                    commit_id=current_state.commit_id,
+                    version_token=current_state.version_token,
+                )
             return
         current_state = self.store.read_branch_ref(branch)
+        if current_state is not None:
+            self.client_state.write_branch_snapshot(
+                branch,
+                commit_id=current_state.commit_id,
+                version_token=current_state.version_token,
+            )
         raise RefConflictError(
             branch=branch,
             operation=operation,

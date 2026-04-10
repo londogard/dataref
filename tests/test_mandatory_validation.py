@@ -34,6 +34,7 @@ class ConflictOnceLocalRepositoryStore(LocalRepositoryStore):
         commit_id: str | None,
         *,
         expected_version_token: str | None,
+        expected_commit_id: str | None = None,
     ) -> bool:
         if self.conflict_next_ref_update:
             self.conflict_next_ref_update = False
@@ -43,6 +44,7 @@ class ConflictOnceLocalRepositoryStore(LocalRepositoryStore):
             branch,
             commit_id,
             expected_version_token=expected_version_token,
+            expected_commit_id=expected_commit_id,
         )
 
 
@@ -432,6 +434,92 @@ def test_remote_prefix_listing_uses_manifest_sidecar(
         repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
 
     assert sorted(entries) == ["logs/a.txt", "logs/b.txt"]
+
+
+def test_s3_compare_and_set_checks_expected_commit_id_under_lock(
+    tmp_path: Path, fake_s3_installer
+) -> None:
+    client = fake_s3_installer({})
+    client.fixed_etag = '"static-etag"'
+
+    worktree = tmp_path / "store-worktree"
+    client_root = tmp_path / "store-client"
+    worktree.mkdir(parents=True)
+    client_root.mkdir(parents=True)
+
+    repo = open_repository(
+        "s3://demo-bucket/repos/conflict-store",
+        worktree=worktree,
+        client_root=client_root,
+        s3_client=client,
+    )
+    store = repo.store
+
+    store.write_branch_ref("main", "base")
+    base_state = store.read_branch_ref("main")
+    assert base_state is not None
+    assert base_state.commit_id == "base"
+
+    store.write_branch_ref("main", "winning")
+
+    updated = store.compare_and_set_branch_ref(
+        "main",
+        "stale",
+        expected_version_token=base_state.version_token,
+        expected_commit_id=base_state.commit_id,
+    )
+
+    assert updated is False
+    current_state = store.read_branch_ref("main")
+    assert current_state is not None
+    assert current_state.commit_id == "winning"
+
+
+def test_remote_repo_commit_detects_conflict_even_if_s3_etag_is_unchanged(
+    tmp_path: Path, fake_s3_installer
+) -> None:
+    client = fake_s3_installer({})
+    client.fixed_etag = '"static-etag"'
+
+    client_a_worktree = tmp_path / "client-a-worktree"
+    client_b_worktree = tmp_path / "client-b-worktree"
+    client_a_root = tmp_path / "client-a-state"
+    client_b_root = tmp_path / "client-b-state"
+    for path in (
+        client_a_worktree,
+        client_b_worktree,
+        client_a_root,
+        client_b_root,
+    ):
+        path.mkdir(parents=True)
+
+    (client_a_worktree / "data.txt").write_text("alpha")
+    repo_a = open_repository(
+        "s3://demo-bucket/repos/conflict-repo",
+        worktree=client_a_worktree,
+        client_root=client_a_root,
+        s3_client=client,
+    )
+    base_commit = repo_a.commit("base")
+
+    (client_b_worktree / "data.txt").write_text("alpha")
+    repo_b = open_repository(
+        "s3://demo-bucket/repos/conflict-repo",
+        worktree=client_b_worktree,
+        client_root=client_b_root,
+        s3_client=client,
+    )
+    (client_b_worktree / "data.txt").write_text("gamma")
+    winning_commit = repo_b.commit("winning update")
+
+    (client_a_worktree / "data.txt").write_text("beta")
+    with pytest.raises(RefConflictError) as error_info:
+        repo_a.commit("stale update")
+
+    error = error_info.value
+    assert error.operation == "commit"
+    assert error.expected_commit_id == base_commit
+    assert error.current_commit_id == winning_commit
 
 
 def test_disposable_analytical_index(tmp_path: Path) -> None:

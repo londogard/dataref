@@ -200,6 +200,22 @@ uv run fluxel verify --repo /tmp/fluxel-demo --ref main --path images --path roo
 
 Fluxel includes `integration`-marked tests for real S3-compatible behavior. The preferred target is Ministack.
 
+For the standard local workflow, run a single command from the repository root:
+
+```bash
+bash scripts/run_s3_integration.sh
+```
+
+That script starts a temporary Ministack container on `127.0.0.1:4566`, waits for the health endpoint, resets emulator state, runs `tests/test_s3_integration.py`, and cleans up the container when the test run finishes.
+
+If you prefer task-runner aliases, the repo also provides:
+
+```bash
+make test-s3-integration
+```
+
+GitHub Actions runs the same script in the dedicated S3 integration job.
+
 Start Ministack locally:
 
 ```bash

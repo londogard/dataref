@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -7,15 +9,28 @@ from tempfile import NamedTemporaryFile
 HEAD_FILE = "HEAD"
 
 
+@dataclass(frozen=True)
+class LocalBranchSnapshot:
+    branch: str
+    commit_id: str | None
+    version_token: str | None
+
+
 class LocalClientState:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
         self.fluxel_dir = self.root / ".fluxel"
         self.refs_dir = self.fluxel_dir / "refs"
+        self.branch_state_dir = self.refs_dir / "heads"
         self.staging_dir = self.fluxel_dir / "staging"
         self.head_path = self.refs_dir / HEAD_FILE
 
-        for path in (self.fluxel_dir, self.refs_dir, self.staging_dir):
+        for path in (
+            self.fluxel_dir,
+            self.refs_dir,
+            self.branch_state_dir,
+            self.staging_dir,
+        ):
             path.mkdir(parents=True, exist_ok=True)
 
     def ensure_current_branch(self, default_branch: str) -> None:
@@ -43,6 +58,36 @@ class LocalClientState:
             stage_path.unlink(missing_ok=True)
             return
         self._atomic_write_text(stage_path, payload)
+
+    def read_branch_snapshot(self, branch: str) -> LocalBranchSnapshot | None:
+        snapshot_path = self.branch_snapshot_path(branch)
+        if not snapshot_path.exists():
+            return None
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        return LocalBranchSnapshot(
+            branch=branch,
+            commit_id=payload.get("commit_id"),
+            version_token=payload.get("version_token"),
+        )
+
+    def write_branch_snapshot(
+        self,
+        branch: str,
+        *,
+        commit_id: str | None,
+        version_token: str | None,
+    ) -> None:
+        payload = json.dumps(
+            {
+                "commit_id": commit_id,
+                "version_token": version_token,
+            },
+            sort_keys=True,
+        )
+        self._atomic_write_text(self.branch_snapshot_path(branch), f"{payload}\n")
+
+    def branch_snapshot_path(self, branch: str) -> Path:
+        return self.branch_state_dir / f"{branch}.json"
 
     def stage_path(self, branch: str) -> Path:
         return self.staging_dir / f"{branch}.json"
