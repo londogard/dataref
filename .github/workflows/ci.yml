@@ -23,6 +23,13 @@ jobs:
             - name: Install dependencies
               run: uv sync --group dev
 
+            - name: Reject macOS junk files
+              run: |
+                if git ls-files | grep -E '(^__MACOSX/|(^|/)\.DS_Store$|(^|/)\._)'; then
+                  echo "Remove macOS archive/junk files before merging."
+                  exit 1
+                fi
+
             - name: Run non-integration tests
               run: uv run pytest tests -m "not integration"
 

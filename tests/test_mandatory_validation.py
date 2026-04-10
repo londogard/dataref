@@ -244,7 +244,7 @@ def test_local_client_state_writes_use_atomic_replace(
     assert (
         state.read_staging_payload("feature") == '[{"path":"a.txt","action":"add"}]\n'
     )
-    assert state.head_path() in replaced_targets
+    assert state.head_path in replaced_targets
     assert state.stage_path("feature") in replaced_targets
     assert not list(state.fluxel_dir.rglob("*.tmp"))
 

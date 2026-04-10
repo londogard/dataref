@@ -13,23 +13,23 @@ class LocalClientState:
         self.fluxel_dir = self.root / ".fluxel"
         self.refs_dir = self.fluxel_dir / "refs"
         self.staging_dir = self.fluxel_dir / "staging"
+        self.head_path = self.refs_dir / HEAD_FILE
 
         for path in (self.fluxel_dir, self.refs_dir, self.staging_dir):
             path.mkdir(parents=True, exist_ok=True)
 
     def ensure_current_branch(self, default_branch: str) -> None:
-        head_path = self.head_path()
-        if not head_path.exists():
+        if not self.head_path.exists():
             self.set_current_branch(default_branch)
 
     def current_branch(self) -> str:
-        content = self.head_path().read_text(encoding="utf-8").strip()
+        content = self.head_path.read_text(encoding="utf-8").strip()
         if not content.startswith("refs/heads/"):
             raise ValueError("HEAD must be a symbolic ref under refs/heads/")
         return content.split("refs/heads/", maxsplit=1)[1]
 
     def set_current_branch(self, branch: str) -> None:
-        self._atomic_write_text(self.head_path(), f"refs/heads/{branch}\n")
+        self._atomic_write_text(self.head_path, f"refs/heads/{branch}\n")
 
     def read_staging_payload(self, branch: str) -> str | None:
         stage_path = self.stage_path(branch)
@@ -43,9 +43,6 @@ class LocalClientState:
             stage_path.unlink(missing_ok=True)
             return
         self._atomic_write_text(stage_path, payload)
-
-    def head_path(self) -> Path:
-        return self.refs_dir / HEAD_FILE
 
     def stage_path(self, branch: str) -> Path:
         return self.staging_dir / f"{branch}.json"
