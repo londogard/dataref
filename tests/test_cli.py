@@ -428,7 +428,7 @@ def test_cli_add_supports_arbitrary_local_source_with_logical_destination(
     )
     entries = list(ManifestReader(manifest_path).iter_entries())
     assert [entry.path for entry in entries] == ["imports/external.txt"]
-    assert entries[0].source_uri == external_file.resolve().as_uri()
+    assert entries[0].source_uri is None
 
 
 def test_cli_add_supports_s3_source_with_staged_read_and_logical_destination(
@@ -820,10 +820,7 @@ def test_cli_import_s3_writes_manifest_and_blobs(
     assert [entry.path for entry in entries] == ["a.txt", "nested/b.txt"]
     assert all(entry.identity_mode == "blake3" for entry in entries)
     assert all(entry.blob_hash for entry in entries)
-    assert {entry.source_uri for entry in entries} == {
-        "s3://demo-bucket/bootstrap/a.txt",
-        "s3://demo-bucket/bootstrap/nested/b.txt",
-    }
+    assert all(entry.source_uri is None for entry in entries)
     for entry in entries:
         blob_path = (
             tmp_path / ".fluxel" / "blobs" / entry.blob_hash[:2] / entry.blob_hash[2:]
@@ -883,10 +880,7 @@ def test_cli_import_s3_preserves_existing_manifest_entries(
     entries = list(ManifestReader(manifest_path).iter_entries())
 
     assert [entry.path for entry in entries] == ["a.txt", "b.txt"]
-    assert {entry.source_uri for entry in entries} == {
-        "s3://demo-bucket/bootstrap/a.txt",
-        "s3://demo-bucket/incremental/b.txt",
-    }
+    assert all(entry.source_uri is None for entry in entries)
     assert (
         sum(1 for path in (tmp_path / ".fluxel" / "blobs").rglob("*") if path.is_file())
         == 2

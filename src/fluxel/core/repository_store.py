@@ -12,12 +12,11 @@ import boto3
 from botocore.exceptions import ClientError
 
 from .layout import blob_relpath, initialize_fluxel_layout
-from .manifest import ManifestEntry, ManifestReader
+from .manifest import ManifestEntry, ManifestReader, deserialize_manifest_entry
 from .manifest_index import (
     build_manifest_index,
     iter_manifest_index_entry_jsons,
     lookup_manifest_index_entry_json,
-    parse_manifest_index_entry_json,
 )
 from .storage import OptimisticLockError
 
@@ -205,20 +204,36 @@ class LocalRepositoryStore(RepositoryStore):
         self, manifest_hash: str, logical_path: str
     ) -> ManifestEntry | None:
         index_path = self.manifest_index_path(manifest_hash)
-        entry_json = lookup_manifest_index_entry_json(index_path, logical_path)
+        manifest_path = self.manifest_path(manifest_hash)
+        entry_json = lookup_manifest_index_entry_json(
+            index_path,
+            logical_path,
+            read_range=lambda start, end: self._read_manifest_range(
+                manifest_path,
+                start,
+                end,
+            ),
+        )
         if entry_json is None:
             return None
-        return ManifestEntry.from_dict(parse_manifest_index_entry_json(entry_json))
+        return deserialize_manifest_entry(entry_json)
 
     def iter_manifest_entries_for_prefix(
         self, manifest_hash: str, logical_prefix: str
     ) -> Iterator[ManifestEntry]:
         normalized_prefix = logical_prefix.strip("/")
         index_path = self.manifest_index_path(manifest_hash)
+        manifest_path = self.manifest_path(manifest_hash)
         for entry_json in iter_manifest_index_entry_jsons(
-            index_path, normalized_prefix or None
+            index_path,
+            normalized_prefix or None,
+            read_range=lambda start, end: self._read_manifest_range(
+                manifest_path,
+                start,
+                end,
+            ),
         ):
-            yield ManifestEntry.from_dict(parse_manifest_index_entry_json(entry_json))
+            yield deserialize_manifest_entry(entry_json)
 
     def write_blob_file(
         self,
@@ -270,6 +285,13 @@ class LocalRepositoryStore(RepositoryStore):
         if kind == "manifest-index":
             return self.manifest_index_path(object_id)
         return self.branch_path(object_id)
+
+    def _read_manifest_range(self, manifest_path: Path, start: int, end: int) -> bytes:
+        if end <= start:
+            return b""
+        with manifest_path.open("rb") as handle:
+            handle.seek(start)
+            return handle.read(end - start)
 
 
 class S3RepositoryStore(RepositoryStore):
@@ -342,13 +364,7 @@ class S3RepositoryStore(RepositoryStore):
                 if not line:
                     continue
                 try:
-                    payload = json.loads(line)
-                except json.JSONDecodeError as error:
-                    raise ValueError(
-                        f"Corrupt manifest JSON at line {line_number} in {manifest_uri}"
-                    ) from error
-                try:
-                    yield ManifestEntry.from_dict(payload)
+                    yield deserialize_manifest_entry(line)
                 except ValueError as error:
                     raise ValueError(
                         f"Invalid manifest entry at line {line_number} in {manifest_uri}: {error}"
@@ -451,10 +467,18 @@ class S3RepositoryStore(RepositoryStore):
         index_path = self._cached_manifest_index_path(manifest_hash)
         if index_path is None:
             raise FileNotFoundError(f"Missing manifest index for: {manifest_hash}")
-        entry_json = lookup_manifest_index_entry_json(index_path, logical_path)
+        entry_json = lookup_manifest_index_entry_json(
+            index_path,
+            logical_path,
+            read_range=lambda start, end: self._read_remote_manifest_range(
+                manifest_hash,
+                start,
+                end,
+            ),
+        )
         if entry_json is None:
             return None
-        return ManifestEntry.from_dict(parse_manifest_index_entry_json(entry_json))
+        return deserialize_manifest_entry(entry_json)
 
     def iter_manifest_entries_for_prefix(
         self, manifest_hash: str, logical_prefix: str
@@ -465,9 +489,15 @@ class S3RepositoryStore(RepositoryStore):
             raise FileNotFoundError(f"Missing manifest index for: {manifest_hash}")
 
         for entry_json in iter_manifest_index_entry_jsons(
-            index_path, normalized_prefix or None
+            index_path,
+            normalized_prefix or None,
+            read_range=lambda start, end: self._read_remote_manifest_range(
+                manifest_hash,
+                start,
+                end,
+            ),
         ):
-            yield ManifestEntry.from_dict(parse_manifest_index_entry_json(entry_json))
+            yield deserialize_manifest_entry(entry_json)
 
     def write_blob_file(
         self,
@@ -542,6 +572,22 @@ class S3RepositoryStore(RepositoryStore):
             temp.write(response["Body"].read())
         self._manifest_index_cache[manifest_hash] = temp_path
         return temp_path
+
+    def _read_remote_manifest_range(
+        self, manifest_hash: str, start: int, end: int
+    ) -> bytes:
+        if end <= start:
+            return b""
+        response = self.client.get_object(
+            Bucket=self.bucket,
+            Key=self._key("manifest", manifest_hash),
+            Range=f"bytes={start}-{end - 1}",
+        )
+        body = response["Body"]
+        try:
+            return body.read()
+        finally:
+            body.close()
 
     def _lock_key(self, branch: str) -> str:
         suffix = f"locks/refs/heads/{branch}.lock"

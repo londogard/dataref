@@ -8,8 +8,7 @@
 from __future__ import annotations
 
 import json
-import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from json import JSONDecodeError
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -21,6 +20,8 @@ from .hashing import blake3_digest_file
 SUPPORTED_IDENTITY_MODES = frozenset({"blake3", "meta"})
 _BLAKE3_HEX_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
+_BLOB_BACKED_MANIFEST_TAG = "b"
+_META_ONLY_MANIFEST_TAG = "m"
 
 
 def _is_hex_digest(value: str) -> bool:
@@ -144,6 +145,86 @@ class ManifestEntry:
         )
 
 
+def serialize_manifest_entry(entry: ManifestEntry) -> str:
+    if entry.identity_mode == "blake3":
+        payload: list[object] = [
+            _BLOB_BACKED_MANIFEST_TAG,
+            entry.path,
+            entry.hash,
+            entry.size,
+            entry.mtime_ns,
+        ]
+    elif entry.identity_mode == "meta":
+        payload = [
+            _META_ONLY_MANIFEST_TAG,
+            entry.path,
+            entry.hash,
+            entry.size,
+            entry.mtime_ns,
+            entry.source_uri,
+        ]
+    else:
+        supported_modes = ", ".join(sorted(SUPPORTED_IDENTITY_MODES))
+        raise ValueError(
+            f"Manifest entry identity_mode must be one of: {supported_modes}"
+        )
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def deserialize_manifest_entry(payload_text: str) -> ManifestEntry:
+    try:
+        payload = _load_manifest_payload(payload_text)
+    except JSONDecodeError as error:
+        raise ValueError("Corrupt manifest entry payload") from error
+
+    return _manifest_entry_from_payload(payload)
+
+
+def manifest_entry_path(payload_text: str) -> str:
+    try:
+        payload = _load_manifest_payload(payload_text)
+    except JSONDecodeError as error:
+        raise ValueError("Corrupt manifest entry payload") from error
+    if not isinstance(payload, list) or len(payload) < 2:
+        raise ValueError("Manifest entry payload must be a JSON array")
+    return str(payload[1])
+
+
+def _load_manifest_payload(payload_text: str) -> object:
+    return json.loads(payload_text)
+
+
+def _manifest_entry_from_payload(payload: object) -> ManifestEntry:
+
+    if not isinstance(payload, list):
+        raise ValueError("Manifest entry payload must be a JSON array")
+    if len(payload) == 5 and payload[0] == _BLOB_BACKED_MANIFEST_TAG:
+        _, path, hash_value, size, mtime_ns = payload
+        return ManifestEntry(
+            path=str(path),
+            hash=str(hash_value),
+            size=int(size),
+            mtime_ns=int(mtime_ns),
+            identity_mode="blake3",
+            identity_value=str(hash_value),
+            blob_hash=str(hash_value),
+            source_uri=None,
+        )
+    if len(payload) == 6 and payload[0] == _META_ONLY_MANIFEST_TAG:
+        _, path, hash_value, size, mtime_ns, source_uri = payload
+        return ManifestEntry(
+            path=str(path),
+            hash=str(hash_value),
+            size=int(size),
+            mtime_ns=int(mtime_ns),
+            identity_mode="meta",
+            identity_value=str(hash_value),
+            blob_hash=None,
+            source_uri=str(source_uri),
+        )
+    raise ValueError("Manifest entry payload has an unsupported shape")
+
+
 class ManifestWriter:
     def __init__(self, manifest_path: str | Path) -> None:
         self.manifest_path = Path(manifest_path)
@@ -153,7 +234,7 @@ class ManifestWriter:
         written = 0
         with self.manifest_path.open("w", encoding="utf-8") as handle:
             for entry in entries:
-                handle.write(json.dumps(asdict(entry), separators=(",", ":")))
+                handle.write(serialize_manifest_entry(entry))
                 handle.write("\n")
                 written += 1
         return written
@@ -184,13 +265,13 @@ class ManifestReader:
                 if not line:
                     continue
                 try:
-                    payload = json.loads(line)
+                    payload = _load_manifest_payload(line)
                 except JSONDecodeError as error:
                     raise ValueError(
                         f"Corrupt manifest JSON at line {line_number} in {self.manifest_path}"
                     ) from error
                 try:
-                    yield ManifestEntry.from_dict(payload)
+                    yield _manifest_entry_from_payload(payload)
                 except ValueError as error:
                     raise ValueError(
                         f"Invalid manifest entry at line {line_number} in {self.manifest_path}: {error}"
@@ -230,7 +311,15 @@ def build_manifest_entries(
 
 def walk_files(root: str | Path) -> Iterator[Path]:
     root_path = Path(root).resolve()
-    for dirpath, dirnames, filenames in os.walk(root_path):
-        dirnames[:] = [name for name in dirnames if name != ".fluxel"]
-        for filename in filenames:
-            yield Path(dirpath) / filename
+
+    def iter_dir(path: Path) -> Iterator[Path]:
+        for child in sorted(path.iterdir(), key=lambda item: item.name):
+            if child.name == ".fluxel":
+                continue
+            if child.is_dir():
+                yield from iter_dir(child)
+                continue
+            if child.is_file():
+                yield child
+
+    yield from iter_dir(root_path)

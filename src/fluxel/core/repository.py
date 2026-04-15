@@ -488,13 +488,18 @@ class FluxelRepository:
                     f"Destination already exists in branch '{branch}': {moved_path}"
                 )
 
+        updated_entries: dict[str, ManifestEntry] = {}
+        for entry in self.store.iter_manifest_entries(base_commit.manifest):
+            moved_path = path_map.get(entry.path)
+            if moved_path is None:
+                updated_entries[entry.path] = entry
+                continue
+            relocated_entry = relocate_manifest_entry(entry, moved_path)
+            updated_entries[relocated_entry.path] = relocated_entry
+
         def iter_entries() -> Iterator[ManifestEntry]:
-            for entry in self.store.iter_manifest_entries(base_commit.manifest):
-                moved_path = path_map.get(entry.path)
-                if moved_path is None:
-                    yield entry
-                    continue
-                yield relocate_manifest_entry(entry, moved_path)
+            for path in sorted(updated_entries):
+                yield updated_entries[path]
 
         temp_manifest = self._write_temp_manifest(iter_entries())
         manifest_hash = blake3_digest_file(temp_manifest)

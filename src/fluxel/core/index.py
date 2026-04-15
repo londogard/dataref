@@ -7,13 +7,13 @@
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 import duckdb
 
-from .manifest import ManifestWriter
 from .repository import open_repository
 
 
@@ -43,13 +43,24 @@ def build_analytical_index(
     db_path = index_root / f"{commit_id}.duckdb"
 
     with NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
+        mode="w", suffix=".csv", delete=False, encoding="utf-8", newline=""
     ) as temp:
         manifest_path = Path(temp.name)
     try:
-        ManifestWriter(manifest_path).write_entries(
-            repo.store.iter_manifest_entries(commit.manifest)
-        )
+        with manifest_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["path", "hash", "size", "mtime_ns", "commit_id", "branch"])
+            for entry in repo.store.iter_manifest_entries(commit.manifest):
+                writer.writerow(
+                    [
+                        entry.path,
+                        entry.hash,
+                        entry.size,
+                        entry.mtime_ns,
+                        commit_id,
+                        commit.branch,
+                    ]
+                )
 
         conn = duckdb.connect(str(db_path))
         try:
@@ -61,11 +72,11 @@ def build_analytical_index(
                     hash::VARCHAR AS hash,
                     size::BIGINT AS size,
                     mtime_ns::BIGINT AS mtime_ns,
-                    ?::VARCHAR AS commit_id,
-                    ?::VARCHAR AS branch
-                FROM read_json_auto(?, format='newline_delimited')
+                    commit_id::VARCHAR AS commit_id,
+                    branch::VARCHAR AS branch
+                FROM read_csv_auto(?, header=true)
                 """,
-                [commit_id, commit.branch, str(manifest_path)],
+                [str(manifest_path)],
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size)")

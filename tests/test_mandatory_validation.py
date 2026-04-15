@@ -217,8 +217,7 @@ def test_manifest_reader_reports_corrupt_json_with_line_context(
 ) -> None:
     manifest_path = tmp_path / "broken.jsonl"
     manifest_path.write_text(
-        '{"path":"ok.txt","hash":"' + ("a" * 64) + '","size":1,"mtime_ns":1}\n'
-        '{"path": invalid json}\n',
+        '["b","ok.txt","' + ("a" * 64) + '",1,1]\n' '{"path": invalid json}\n',
         encoding="utf-8",
     )
 
