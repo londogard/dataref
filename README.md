@@ -32,21 +32,27 @@ Fluxel is intentionally in MVP mode.
 ### Implemented
 
 - Commit snapshots over a dataset root (`fluxel commit`).
+- Repository URI support via `--repo <path|s3://bucket/prefix>` and `open_repository(...)`.
+- Streaming S3 imports (`fluxel import`) with `blake3` or metadata identity modes.
 - Branch-scoped staging workflow (`fluxel add`, `fluxel rm`, `fluxel status`, `fluxel commit --staged`).
+- Incremental ingress paths that preserve existing manifest entries while adding only new content metadata/blobs.
 - Commit identity modes: `blake3` (default) and `meta` (`hash(path+size)`).
 - Verify command to promote metadata-only entries to canonical blobs (`fluxel verify`).
 - Zero-copy branch pointers (`fluxel branch`).
+- Fast-forward-only branch merge (`fluxel merge`).
 - Metadata-only diff between refs (`fluxel diff`).
+- Metadata-only manifest mutations for committed refs (`fluxel rm -m ...`, `fluxel mv -m ... ...`).
 - Disposable analytical index from manifest (`fluxel index build/query/drop`, DuckDB + optional Parquet export).
 - `fsspec` provider for `fluxel://` URI reads.
 - Local + S3 storage backend abstractions available in code.
 
 ### Not Fully Wired Yet
 
-- Repository commands still use local-path flow as primary execution path.
 - No remote sync CLI (`push/pull/fetch`) yet.
 - No `log/status/list/checkout` CLI surface yet.
 - No `s5cmd` command-list generation path for bulk transfer yet.
+- S3 branch locking now recovers expired stale lock objects automatically, but there is still no operator-facing lock inspection or cleanup command.
+- S3 branch locking now recovers expired stale lock objects automatically, but there is still no operator-facing lock inspection or cleanup command.
 
 ## Technical Stack
 
@@ -63,33 +69,60 @@ uv sync
 uv run fluxel --help
 ```
 
+## License And Support
+
+Fluxel is licensed under the GNU Affero General Public License v3.0 or later.
+
+- The license keeps copyright and license notices attached to redistributed copies.
+- Modified networked deployments must make their corresponding source available under the AGPL terms.
+- That gives companies a practical reason to fund maintenance if they depend on Fluxel while keeping the project genuinely open source.
+
+If your company uses Fluxel, sponsor ongoing maintenance at <https://github.com/sponsors/londogard>.
+
 ## Quickstart
 
 ```bash
 mkdir -p /tmp/fluxel-demo
 echo "hello" > /tmp/fluxel-demo/a.txt
 
-uv run fluxel commit --root /tmp/fluxel-demo -m "initial"
-uv run fluxel commit --root /tmp/fluxel-demo -m "fast metadata snapshot" --identity meta
-uv run fluxel verify --root /tmp/fluxel-demo --ref main
+uv run fluxel commit --repo /tmp/fluxel-demo -m "initial"
+uv run fluxel commit --repo /tmp/fluxel-demo -m "fast metadata snapshot" --identity meta
+uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/bootstrap -m "bootstrap import"
+uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/bootstrap -m "metadata import" --identity meta
+uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/bootstrap -m "jpg subset" --path "**/*.jpg" --path root.csv
+uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/incremental -m "add new import batch"
+uv run fluxel verify --repo /tmp/fluxel-demo --ref main
 
 # branch-scoped staged flow
-uv run fluxel branch --root /tmp/fluxel-demo feature
-uv run fluxel add --root /tmp/fluxel-demo --ref feature data/new.csv
-uv run fluxel status --root /tmp/fluxel-demo --ref feature
-uv run fluxel commit --root /tmp/fluxel-demo --ref feature --staged -m "feature updates"
+uv run fluxel branch --repo /tmp/fluxel-demo feature
+uv run fluxel add --repo /tmp/fluxel-demo --ref feature data/new.csv
+uv run fluxel add --repo /tmp/fluxel-demo --ref feature --as imports/raw.csv /tmp/outside-repo/raw.csv
+uv run fluxel add --repo /tmp/fluxel-demo --ref feature --as imports/bundle /tmp/outside-repo/bundle
+uv run fluxel add --repo /tmp/fluxel-demo --ref feature --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
+uv run fluxel add --repo /tmp/fluxel-demo --ref feature --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
+uv run fluxel status --repo /tmp/fluxel-demo --ref feature
+uv run fluxel commit --repo /tmp/fluxel-demo --ref feature --staged -m "feature updates"
+uv run fluxel merge --repo /tmp/fluxel-demo feature main
 
 echo "hello v2" > /tmp/fluxel-demo/a.txt
-uv run fluxel commit --root /tmp/fluxel-demo -m "update"
+uv run fluxel commit --repo /tmp/fluxel-demo -m "update"
 
-uv run fluxel branch --root /tmp/fluxel-demo experiment
-uv run fluxel diff --root /tmp/fluxel-demo <from_ref> <to_ref>
+uv run fluxel branch --repo /tmp/fluxel-demo experiment
+uv run fluxel diff --repo /tmp/fluxel-demo <from_ref> <to_ref>
+uv run fluxel rm --repo /tmp/fluxel-demo old-prefix -m "remove old files"
+uv run fluxel mv --repo /tmp/fluxel-demo raw/images curated/images -m "rename image prefix"
+
+# remote repo metadata operations from the current working tree
+uv run fluxel branch --repo s3://my-bucket/datasets/demo feature
+uv run fluxel commit --repo s3://my-bucket/datasets/demo -m "snapshot current working tree"
+uv run fluxel rm --repo s3://my-bucket/datasets/demo obsolete -m "drop obsolete paths"
+uv run fluxel mv --repo s3://my-bucket/datasets/demo bootstrap final -m "rename imported prefix"
 ```
 
 ## Analytical Index (Derived, Disposable)
 
 ```bash
-uv run fluxel index build --root /tmp/fluxel-demo --ref main --parquet
+uv run fluxel index build --repo /tmp/fluxel-demo --ref main --parquet
 uv run fluxel index query --db /path/to/<commit>.duckdb --sql "SELECT COUNT(*) FROM files"
 uv run fluxel index drop --db /path/to/<commit>.duckdb
 ```
@@ -133,15 +166,127 @@ This is useful for large bootstrap imports where strong content verification can
 `fluxel verify` promotes metadata-only (`--identity meta`) manifest entries into canonical `blake3` blob-backed entries:
 
 ```bash
-uv run fluxel verify --root /tmp/fluxel-demo --ref main
-uv run fluxel verify --root /tmp/fluxel-demo --ref main --path images --path logs/2026
-uv run fluxel verify --root /tmp/fluxel-demo --ref main --dry-run
+uv run fluxel verify --repo /tmp/fluxel-demo --ref main
+uv run fluxel verify --repo /tmp/fluxel-demo --ref main --path images --path logs/2026
+uv run fluxel verify --repo /tmp/fluxel-demo --ref main --dry-run
 ```
 
 - Verifies all entries by default (or selected path prefixes with `--path`).
 - `--dry-run` reports how many entries would be promoted without changing blobs/commits.
 - Reads bytes from each entry's `source_uri`, computes Blake3, and stores canonical blob content.
 - Writes a new commit only when at least one entry is promoted.
+
+## Incremental Ingress
+
+Fluxel's efficient content-ingress paths are:
+
+```bash
+uv run fluxel add --repo /tmp/fluxel-demo local/new.csv
+uv run fluxel add --repo /tmp/fluxel-demo --as imports/new.csv /tmp/random/new.csv
+uv run fluxel add --repo /tmp/fluxel-demo --as imports/new-batch /tmp/random/new-batch
+uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
+uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
+uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "add one file"
+uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/incremental -m "merge imported batch"
+uv run fluxel verify --repo /tmp/fluxel-demo --ref main --path images --path root.txt
+```
+
+- `add` + `commit --staged` preserves the current branch manifest and reads bytes only for staged additions.
+- `add` accepts repo-relative files, arbitrary local files, local directories, single S3 objects, and S3 prefixes; `--as` maps a single file/object to one logical path or remaps a directory/prefix under a destination prefix.
+- `import` merges imported S3 entries into the current branch manifest instead of replacing the snapshot.
+- `verify` reads bytes only for selected metadata-only entries that still need canonical blobs.
+- Existing manifest entries are preserved without re-uploading unchanged blob content.
+
+## S3 Integration Tests
+
+Fluxel includes `integration`-marked tests for real S3-compatible behavior. The preferred target is Ministack.
+
+For the standard local workflow, run a single command from the repository root:
+
+```bash
+bash scripts/run_s3_integration.sh
+```
+
+That script starts a temporary Ministack container on `127.0.0.1:4566`, waits for the health endpoint, resets emulator state, runs `tests/test_s3_integration.py`, and cleans up the container when the test run finishes.
+
+If you prefer task-runner aliases, the repo also provides:
+
+```bash
+make test-s3-integration
+```
+
+GitHub Actions runs the same script in the dedicated S3 integration job.
+
+Start Ministack locally:
+
+```bash
+docker run --rm -p 4566:4566 nahuelnucera/ministack
+```
+
+If you also want MiniStack features that launch real sidecar containers such as RDS, ECS, or Docker-backed Lambda runtimes, mount the Docker socket:
+
+```bash
+docker run --rm -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock nahuelnucera/ministack
+```
+
+Verify the emulator is ready:
+
+```bash
+curl http://127.0.0.1:4566/_ministack/health
+```
+
+Then set these environment variables before running the suite:
+
+```bash
+export FLUXEL_MINISTACK_ENDPOINT=http://127.0.0.1:4566
+export FLUXEL_MINISTACK_ACCESS_KEY=test
+export FLUXEL_MINISTACK_SECRET_KEY=test
+export FLUXEL_MINISTACK_REGION=us-east-1
+```
+
+Fluxel's integration fixture already uses path-style boto3 S3 addressing, so no extra S3 client flags are needed.
+
+Then run:
+
+```bash
+uv run pytest tests/test_s3_integration.py -m integration
+```
+
+If `FLUXEL_MINISTACK_ENDPOINT` is unset or the endpoint is unreachable, the integration tests skip automatically.
+
+To wipe the local emulator state between runs without restarting the container:
+
+```bash
+curl -X POST http://127.0.0.1:4566/_ministack/reset
+```
+
+## Merge Command
+
+`fluxel merge` updates a target branch by fast-forward only:
+
+```bash
+uv run fluxel merge --repo /tmp/fluxel-demo feature main
+```
+
+- The source ref can be a branch or commit.
+- The target ref must be a branch.
+- The merge succeeds only when the target branch head is an ancestor of the source ref.
+- Non-fast-forward merges are rejected.
+
+## Metadata-Only Remove And Move
+
+`fluxel rm` and `fluxel mv` can mutate committed refs directly by writing a new manifest and commit:
+
+```bash
+uv run fluxel rm --repo /tmp/fluxel-demo logs/2025 -m "remove old logs"
+uv run fluxel mv --repo /tmp/fluxel-demo incoming/images curated/images -m "rename prefix"
+uv run fluxel rm --repo s3://my-bucket/datasets/demo temp -m "drop temp data"
+```
+
+- These operations read manifest metadata only; they do not download unchanged blob payloads.
+- `rm` accepts file paths or path prefixes and removes all matching logical entries.
+- `mv` accepts a file path or prefix and rewrites matching logical paths in the manifest.
+- Existing staged behavior remains available: `fluxel rm` without `-m/--message` still stages removals for `fluxel commit --staged`.
 
 ## Repository Layout
 

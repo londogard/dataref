@@ -15,9 +15,9 @@ from typing import BinaryIO, Iterator
 import fsspec
 from fsspec.spec import AbstractFileSystem
 
-from .layout import blob_relpath
 from .manifest import ManifestEntry
 from .repository import FluxelRepository
+from .storage import open_source_uri
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,7 @@ class FluxelFileSystem(AbstractFileSystem):
         self.dataset_roots = {
             name: Path(root).resolve() for name, root in (dataset_roots or {}).items()
         }
+        self._repositories: dict[Path, FluxelRepository] = {}
 
     @classmethod
     def _strip_protocol(cls, path: str) -> str:
@@ -59,10 +60,10 @@ class FluxelFileSystem(AbstractFileSystem):
             )
         resolved = self._resolve_entry(path)
         if resolved.entry.blob_hash:
-            blob_path = self._blob_path(resolved.root, resolved.entry.blob_hash)
-            return io.BytesIO(blob_path.read_bytes())
+            repo = self._repository(resolved.root)
+            return io.BytesIO(repo.read_blob(resolved.entry.blob_hash))
         if resolved.entry.source_uri:
-            return fsspec.open(resolved.entry.source_uri, mode="rb").open()
+            return _SourceURIFile(open_source_uri(resolved.entry.source_uri))
         raise FileNotFoundError(
             "Entry has no canonical blob hash and no readable source URI"
         )
@@ -93,19 +94,18 @@ class FluxelFileSystem(AbstractFileSystem):
     ) -> list[dict[str, object]] | list[str]:
         uri = self._parse_uri(path, allow_empty_path=True)
         root = self._dataset_root(uri.dataset)
-        repo = FluxelRepository(root)
-        entries = repo.resolve_entries(uri.ref, include_staging=uri.include_staging)
+        repo = self._repository(root)
 
         normalized_prefix = uri.logical_path.strip("/")
         if normalized_prefix == "*":
             normalized_prefix = ""
+        entries = repo.resolve_entries_for_prefix(
+            uri.ref,
+            normalized_prefix,
+            include_staging=uri.include_staging,
+        )
         results: list[dict[str, object] | str] = []
         for entry in entries.values():
-            if normalized_prefix and not (
-                entry.path == normalized_prefix
-                or entry.path.startswith(f"{normalized_prefix}/")
-            ):
-                continue
             as_uri = f"fluxel://{uri.dataset}@{uri.ref}/{entry.path}"
             if detail:
                 results.append(
@@ -124,13 +124,24 @@ class FluxelFileSystem(AbstractFileSystem):
     def _resolve_entry(self, path: str) -> "ResolvedEntry":
         uri = self._parse_uri(path)
         root = self._dataset_root(uri.dataset)
-        repo = FluxelRepository(root)
+        repo = self._repository(root)
         commit_id = repo.resolve_ref(uri.ref)
-        entries = repo.resolve_entries(uri.ref, include_staging=uri.include_staging)
-        entry = entries.get(uri.logical_path)
+        entry = repo.resolve_entry(
+            uri.ref,
+            uri.logical_path,
+            include_staging=uri.include_staging,
+            commit_id=commit_id,
+        )
         if entry is None:
             raise FileNotFoundError(path)
         return ResolvedEntry(uri=uri, root=root, commit_id=commit_id, entry=entry)
+
+    def _repository(self, root: Path) -> FluxelRepository:
+        repo = self._repositories.get(root)
+        if repo is None:
+            repo = FluxelRepository(root)
+            self._repositories[root] = repo
+        return repo
 
     def _dataset_root(self, dataset: str) -> Path:
         if dataset in self.dataset_roots:
@@ -170,9 +181,6 @@ class FluxelFileSystem(AbstractFileSystem):
             include_staging=include_staging,
         )
 
-    def _blob_path(self, dataset_root: Path, content_hash: str) -> Path:
-        return dataset_root / ".fluxel" / "blobs" / blob_relpath(content_hash)
-
 
 @dataclass(frozen=True)
 class ResolvedEntry:
@@ -180,6 +188,38 @@ class ResolvedEntry:
     root: Path
     commit_id: str
     entry: ManifestEntry
+
+
+class _SourceURIFile(io.IOBase):
+    def __init__(self, context_manager: object) -> None:
+        self._context_manager = context_manager
+        self._handle = context_manager.__enter__()
+
+    def read(self, size: int = -1) -> bytes:
+        return self._handle.read(size)
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return bool(getattr(self._handle, "seekable", lambda: False)())
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        return self._handle.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._handle.tell()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            close = getattr(self._handle, "close", None)
+            if callable(close):
+                close()
+        finally:
+            self._context_manager.__exit__(None, None, None)
+            super().close()
 
 
 fsspec.register_implementation("fluxel", FluxelFileSystem)

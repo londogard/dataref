@@ -1,12 +1,31 @@
 [project]
 name = "fluxel"
 version = "0.1.0"
-description = "Add your description here"
+description = "A client-first, object-storage-first data versioning engine"
 readme = "README.md"
 authors = [
     { name = "Hampus Londögård", email = "hampus.londogard@verisure.com" },
 ]
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
+keywords = [
+    "data-versioning",
+    "dataset-versioning",
+    "object-storage",
+    "s3",
+    "serverless",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Version Control",
+]
 dependencies = [
     "blake3>=1.0.8",
     "boto3>=1.42.57",
@@ -14,6 +33,13 @@ dependencies = [
     "fsspec>=2026.2.0",
     "simple-parsing>=0.1.7",
 ]
+
+[project.urls]
+Repository = "https://github.com/londogard/strand"
+Documentation = "https://github.com/londogard/strand#readme"
+Issues = "https://github.com/londogard/strand/issues"
+Changelog = "https://github.com/londogard/strand/blob/main/CHANGELOG.md"
+Funding = "https://github.com/sponsors/londogard"
 
 [project.scripts]
 fluxel = "fluxel:main"
@@ -24,3 +50,8 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = ["pytest>=9.0.2"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that require a real S3-compatible service such as Ministack",
+]
