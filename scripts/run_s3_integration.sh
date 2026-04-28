@@ -88,4 +88,4 @@ wait_for_ministack
 curl -fsS -X POST "$RESET_URL" >/dev/null 2>&1 || true
 
 cd "$ROOT_DIR"
-uv run pytest tests/test_s3_integration.py -m integration "$@"
+uv run pytest tests/test_s3_integration.py -v -s -m integration "$@"

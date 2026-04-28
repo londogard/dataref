@@ -52,6 +52,7 @@ Fluxel is intentionally in MVP mode.
 - No `log/status/list/checkout` CLI surface yet.
 - No `s5cmd` command-list generation path for bulk transfer yet.
 - S3 branch locking now recovers expired stale lock objects automatically, but there is still no operator-facing lock inspection or cleanup command.
+- S3 branch locking now recovers expired stale lock objects automatically, but there is still no operator-facing lock inspection or cleanup command.
 
 ## Technical Stack
 

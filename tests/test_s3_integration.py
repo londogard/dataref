@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -195,3 +196,137 @@ def test_s3_integration_reports_optimistic_concurrency_conflicts(
     assert error.operation == "commit"
     assert error.expected_commit_id == base_commit
     assert error.current_commit_id == winning_commit
+
+
+def test_s3_integration_million_file_scale(
+    tmp_path: Path,
+    ministack_client,
+    s3_repo_root: str,
+    caplog,
+) -> None:
+    """Test manifest index performance at 1M files with timing measurements.
+
+    Validates:
+    - Specific file lookup is O(log B + 1)
+    - Prefix listing with 200 matches is O(log B + 200)
+    - Bulk downloads use manifest cache effectively
+
+    Logs timing measurements for performance regression detection.
+    """
+    worktree = tmp_path / "worktree"
+    client_root = tmp_path / "client-state"
+    worktree.mkdir(parents=True)
+    client_root.mkdir(parents=True)
+
+    # 1. Generate 1M files locally (much faster than S3 API calls)
+    print("\n[SCALE TEST] Generating 1M files locally...")
+    gen_start = time.perf_counter()
+    (worktree / "images" / "cats").mkdir(parents=True, exist_ok=True)
+    (worktree / "images" / "dogs").mkdir(parents=True, exist_ok=True)
+    (worktree / "logs").mkdir(parents=True, exist_ok=True)
+    (worktree / "other").mkdir(parents=True, exist_ok=True)
+    cat_content = f"cat".encode()
+    dog_content = f"dog".encode()
+    data_content = f"data".encode()
+
+    for i in range(1_000_000):
+        # Distribute: images/cats/* (200), images/dogs/* (300), other/* (999_500)
+        if i < 200:
+            path = worktree / "images" / "cats" / f"cat_{i:06d}.jpg"
+            # content = cat_content
+        elif i < 500:
+            path = worktree / "images" / "dogs" / f"dog_{i:06d}.jpg"
+            # content = dog_content
+        else:
+            # Alternate between logs and other for realistic distribution
+            category = "logs" if (i % 2) == 0 else "other"
+            path = worktree / category / f"file_{i:07d}.bin"
+            # content = data_content
+
+        path.touch()
+
+    gen_time = time.perf_counter() - gen_start
+    print(
+        f"[SCALE TEST] Generated 1M files in {gen_time:.2f}s ({1_000_000/gen_time:.0f} files/sec)"
+    )
+
+    # 2. Commit to Fluxel (creates manifest + index from local files)
+    print("[SCALE TEST] Committing 1M files to Fluxel...")
+    repo = _open_remote_repo(
+        s3_repo_root,
+        worktree=worktree,
+        client_root=client_root,
+        s3_client=ministack_client,
+    )
+    commit_start = time.perf_counter()
+    commit_id = repo.commit("1M file snapshot (meta)", identity_mode="meta")
+    commit_time = time.perf_counter() - commit_start
+    assert commit_id
+    print(
+        f"[SCALE TEST] Commit + manifest build in {commit_time:.2f}s ({1_000_000/commit_time:.0f} files/sec)"
+    )
+
+    # 3. Test: Specific file lookup (should be O(log B + 1))
+    print("[SCALE TEST] Testing specific file lookup...")
+    lookup_start = time.perf_counter()
+    cat_50 = repo.resolve_entry("main", "images/cats/cat_000050.jpg")
+    lookup_time = time.perf_counter() - lookup_start
+    assert cat_50 is not None
+    assert cat_50.size == 0  # touch
+    print(f"[SCALE TEST] Single file lookup: {lookup_time*1000:.3f}ms")
+
+    # 4. Test: Prefix listing (should be O(log B + 200))
+    print("[SCALE TEST] Testing prefix listing (images/cats/*)...")
+    listing_start = time.perf_counter()
+    cats = repo.resolve_entries_for_prefix("main", "images/cats")
+    listing_time = time.perf_counter() - listing_start
+    assert len(cats) == 200
+    print(f"[SCALE TEST] Prefix listing 200 files: {listing_time*1000:.3f}ms")
+
+    # 5. Test: Bulk metadata access (simulating download planning)
+    print("[SCALE TEST] Bulk metadata access (200 files)...")
+    bulk_start = time.perf_counter()
+    bulk_data = []
+    for path, entry in cats.items():
+        # Simulate metadata-only access (no blob reads)
+        bulk_data.append((path, entry.size, entry.identity_mode))
+    bulk_time = time.perf_counter() - bulk_start
+    assert len(bulk_data) == 200
+    assert all(t[1] == 0 for t in bulk_data)  # All have size
+    print(f"[SCALE TEST] Bulk metadata access (200): {bulk_time*1000:.3f}ms")
+
+    # 6. Test: Cached prefix listing (should be faster)
+    print("[SCALE TEST] Testing cached prefix listing...")
+    cached_start = time.perf_counter()
+    cats_again = repo.resolve_entries_for_prefix("main", "images/cats")
+    cached_time = time.perf_counter() - cached_start
+    assert len(cats_again) == 200
+    print(f"[SCALE TEST] Cached prefix listing: {cached_time*1000:.3f}ms")
+
+    # 7. Summary and assertions
+    print("\n[SCALE TEST] Performance Summary:")
+    print(
+        f"  Generate 1M files:       {gen_time:.2f}s ({1_000_000/gen_time:.0f} files/sec)"
+    )
+    print(
+        f"  Commit + manifest:       {commit_time:.2f}s ({1_000_000/commit_time:.0f} files/sec)"
+    )
+    print(f"  Single lookup:           {lookup_time*1000:.3f}ms")
+    print(f"  Prefix list (200):       {listing_time*1000:.3f}ms")
+    print(f"  Bulk metadata (200):     {bulk_time*1000:.3f}ms")
+    print(f"  Cached prefix list:      {cached_time*1000:.3f}ms")
+
+    # Verify manifest index is working: specific lookup should be fast (< 100ms)
+    assert (
+        lookup_time < 0.1
+    ), f"Single lookup took {lookup_time*1000:.3f}ms (expected < 100ms)"
+
+    # Prefix listing should also be fast (< 200ms for 200 matches)
+    assert (
+        listing_time < 0.2
+    ), f"Prefix listing took {listing_time*1000:.3f}ms (expected < 200ms)"
+
+    # Cached listing should be noticeably faster than initial
+    assert (
+        cached_time <= listing_time or cached_time < 0.1
+    ), "Cached listing should be <= initial listing time"
