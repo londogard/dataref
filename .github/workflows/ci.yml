@@ -1,0 +1,61 @@
+name: CI
+
+on:
+    push:
+    pull_request:
+
+jobs:
+    test-and-build:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+
+            - name: Set up uv
+              uses: astral-sh/setup-uv@v4
+
+            - name: Install dependencies
+              run: uv sync --group dev
+
+            - name: Reject macOS junk files
+              run: |
+                  if git ls-files | grep -E '(^__MACOSX/|(^|/)\.DS_Store$|(^|/)\._)'; then
+                    echo "Remove macOS archive/junk files before merging."
+                    exit 1
+                  fi
+
+            - name: Run non-integration tests
+              run: uv run pytest tests -m "not integration"
+
+            - name: Smoke-test CLI help
+              run: uv run fluxel --help
+
+            - name: Build package
+              run: uv build
+
+    s3-integration:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+
+            - name: Set up uv
+              uses: astral-sh/setup-uv@v4
+
+            - name: Install dependencies
+              run: uv sync --group dev
+
+            - name: Run S3 integration tests against MiniStack
+              run: bash scripts/run_s3_integration.sh
