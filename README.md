@@ -109,8 +109,16 @@ uv run fluxel commit --repo /tmp/fluxel-demo -m "update"
 
 uv run fluxel branch --repo /tmp/fluxel-demo experiment
 uv run fluxel diff --repo /tmp/fluxel-demo <from_ref> <to_ref>
-uv run fluxel rm --repo /tmp/fluxel-demo old-prefix -m "remove old files"
-uv run fluxel mv --repo /tmp/fluxel-demo raw/images curated/images -m "rename image prefix"
+
+# Stage and commit metadata mutations
+uv run fluxel rm --repo /tmp/fluxel-demo old-prefix
+uv run fluxel mv --repo /tmp/fluxel-demo raw/images curated/images
+uv run fluxel status --repo /tmp/fluxel-demo
+uv run fluxel commit --repo /tmp/fluxel-demo -m "clean up old files and rename image prefix"
+
+# Or commit metadata mutations directly with a message
+uv run fluxel rm --repo /tmp/fluxel-demo logs/2025 -m "remove old logs"
+uv run fluxel mv --repo /tmp/fluxel-demo incoming/images curated/images -m "reorganize images"
 
 # remote repo metadata operations from the current working tree
 uv run fluxel branch --repo s3://my-bucket/datasets/demo feature
