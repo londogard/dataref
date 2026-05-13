@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -274,3 +277,197 @@ def open_source_uri(
         return
     with fsspec.open(source_uri, mode="rb").open() as handle:
         yield handle
+
+
+class BlobTransferBackend(Protocol):
+    """Interface for blob storage transfer operations.
+
+    Implementations can use any tool (boto3, s5cmd, awscli, etc.)
+    Swappable to suit different environments and performance needs.
+    """
+
+    def upload(
+        self,
+        local_path: str,
+        remote_uri: str,
+        *,
+        if_not_exists: bool = False,
+    ) -> None: ...
+
+    def download(self, remote_uri: str, local_path: str) -> None: ...
+
+    def list_objects(self, uri_prefix: str) -> Iterator[S3ObjectMetadata]: ...
+
+    def delete(self, remote_uri: str) -> None: ...
+
+    def exists(self, remote_uri: str) -> bool: ...
+
+
+class S3BlobTransferBackend:
+    """Blob transfer backend using boto3 directly."""
+
+    def __init__(self, client: object | None = None) -> None:
+        self.client = client or boto3.client("s3")
+
+    def upload(
+        self,
+        local_path: str,
+        remote_uri: str,
+        *,
+        if_not_exists: bool = False,
+    ) -> None:
+        bucket, key = parse_s3_uri(remote_uri)
+        kwargs = {"Bucket": bucket, "Key": key, "Body": Path(local_path).read_bytes()}
+        if if_not_exists:
+            kwargs["IfNoneMatch"] = "*"
+        try:
+            self.client.put_object(**kwargs)
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code", "")
+            if if_not_exists and code in {"PreconditionFailed", "412"}:
+                raise OptimisticLockError(
+                    f"Object already exists: {remote_uri}"
+                ) from error
+            raise
+
+    def download(self, remote_uri: str, local_path: str) -> None:
+        bucket, key = parse_s3_uri(remote_uri)
+        response = self.client.get_object(Bucket=bucket, Key=key)
+        body = response["Body"]
+        try:
+            Path(local_path).write_bytes(body.read())
+        finally:
+            body.close()
+
+    def list_objects(self, uri_prefix: str) -> Iterator[S3ObjectMetadata]:
+        bucket, prefix = parse_s3_uri(uri_prefix)
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                yield S3ObjectMetadata(
+                    bucket=bucket,
+                    key=str(obj["Key"]),
+                    size=int(obj.get("Size", 0)),
+                    mtime_ns=_mtime_ns(obj.get("LastModified")),
+                )
+
+    def delete(self, remote_uri: str) -> None:
+        bucket, key = parse_s3_uri(remote_uri)
+        self.client.delete_object(Bucket=bucket, Key=key)
+
+    def exists(self, remote_uri: str) -> bool:
+        bucket, key = parse_s3_uri(remote_uri)
+        try:
+            self.client.head_object(Bucket=bucket, Key=key)
+            return True
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code", "")
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                return False
+            raise
+
+
+class S5CmdBlobTransferBackend:
+    """Blob transfer backend using s5cmd for high-throughput S3 operations.
+
+    Uses subprocess to shell out to s5cmd. Best for bulk operations
+    where s5cmd's parallel transfer engine provides significant speedups.
+
+    Requires s5cmd to be installed and available on PATH.
+    """
+
+    def __init__(
+        self,
+        s5cmd_path: str = "s5cmd",
+        endpoint_url: str | None = None,
+    ) -> None:
+        self._s5cmd_path = s5cmd_path
+        self._endpoint = endpoint_url
+
+    def _run(
+        self,
+        args: list[str],
+        input_data: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        cmd = [self._s5cmd_path]
+        if self._endpoint:
+            cmd.extend(["--endpoint-url", self._endpoint])
+        cmd.extend(args)
+        return subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            input=input_data,
+            check=True,
+        )
+
+    def upload(
+        self,
+        local_path: str,
+        remote_uri: str,
+        *,
+        if_not_exists: bool = False,
+    ) -> None:
+        flag = "--if-not-exists" if if_not_exists else ""
+        parts = ["cp", flag, local_path, remote_uri]
+        self._run([p for p in parts if p])
+
+    def download(self, remote_uri: str, local_path: str) -> None:
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        self._run(["cp", remote_uri, local_path])
+
+    def list_objects(self, uri_prefix: str) -> Iterator[S3ObjectMetadata]:
+        bucket, prefix = parse_s3_uri(uri_prefix)
+        result = self._run(["ls", uri_prefix])
+        for line in result.stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            # s5cmd ls output: "2024-01-15 10:30:00         1234 s3://bucket/key"
+            try:
+                size = int(parts[2])
+            except (ValueError, IndexError):
+                try:
+                    size = int(parts[1])
+                except (ValueError, IndexError):
+                    size = 0
+            key = parts[-1]
+            key_path = key[len(f"s3://{bucket}/"):] if key.startswith(f"s3://{bucket}/") else key.lstrip("/")
+            yield S3ObjectMetadata(
+                bucket=bucket,
+                key=key_path,
+                size=size,
+                mtime_ns=0,
+            )
+
+    def delete(self, remote_uri: str) -> None:
+        self._run(["rm", remote_uri])
+
+    def exists(self, remote_uri: str) -> bool:
+        try:
+            result = self._run(["ls", remote_uri])
+            return bool(result.stdout.strip())
+        except subprocess.CalledProcessError:
+            return False
+
+
+def build_blob_transfer_backend(
+    backend_type: str = "boto3",
+    **kwargs: object,
+) -> BlobTransferBackend:
+    """Factory to create a BlobTransferBackend by name.
+
+    Args:
+        backend_type: "boto3" (default) or "s5cmd"
+        **kwargs: Passed to the backend constructor.
+
+    Returns:
+        A BlobTransferBackend instance.
+    """
+    if backend_type == "boto3":
+        return S3BlobTransferBackend(**kwargs)  # type: ignore[arg-type]
+    if backend_type == "s5cmd":
+        return S5CmdBlobTransferBackend(**kwargs)  # type: ignore[arg-type]
+    raise ValueError(f"Unknown blob transfer backend: {backend_type}")
