@@ -40,7 +40,13 @@ from .repository_support import (
     normalize_s3_import_path,
     relocate_manifest_entry,
 )
-from .storage import iter_s3_objects, open_source_uri, parse_s3_uri
+from .storage import (
+    BlobTransferBackend,
+    build_blob_transfer_backend,
+    iter_s3_objects,
+    open_source_uri,
+    parse_s3_uri,
+)
 from .storage import describe_source_uri
 
 
@@ -104,12 +110,16 @@ class StageChange:
     action: str
     identity_mode: str | None = None
     source_uri: str | None = None
+    blob_hash: str | None = None
+    size: int | None = None
 
     @staticmethod
     def from_dict(data: dict[str, object]) -> "StageChange":
         action = str(data["action"])
         identity_mode_raw = data.get("identity_mode")
         source_uri_raw = data.get("source_uri")
+        blob_hash_raw = data.get("blob_hash")
+        size_raw = data.get("size")
         return StageChange(
             path=str(data["path"]),
             action=action,
@@ -117,6 +127,8 @@ class StageChange:
                 str(identity_mode_raw) if identity_mode_raw is not None else None
             ),
             source_uri=str(source_uri_raw) if source_uri_raw is not None else None,
+            blob_hash=str(blob_hash_raw) if blob_hash_raw is not None else None,
+            size=int(size_raw) if size_raw is not None else None,
         )
 
 
@@ -154,9 +166,19 @@ class FluxelRepository:
         *,
         store: RepositoryStore | None = None,
         client_state: LocalClientState | None = None,
+        blob_transfer: BlobTransferBackend | None = None,
     ) -> None:
         self.layout = initialize_fluxel_layout(root)
         self.store = store or LocalRepositoryStore(self.layout.root)
+        if isinstance(self.store, S3RepositoryStore) and blob_transfer is not None:
+            self.store = S3RepositoryStore(
+                self.store.bucket,
+                self.store.prefix,
+                client=self.store.client,
+                branch_root=self.store.branch_root,
+                lock_timeout_seconds=self.store.lock_timeout_seconds,
+                blob_transfer=blob_transfer,
+            )
         self.client_state = client_state or LocalClientState(self.layout.root)
         self._resolved_ref_cache: dict[str, BranchRefState] = {}
         self._commit_cache: dict[str, CommitObject] = {}
@@ -322,25 +344,25 @@ class FluxelRepository:
         branch_state = self._require_branch_state(branch)
         parent_commit = branch_state.commit_id
 
-        index: dict[str, ManifestEntry]
+        parent_manifest: str | None = None
         if parent_commit:
             parent = self.read_commit(parent_commit)
-            index = self._manifest_index(parent.manifest)
-        else:
-            index = {}
+            parent_manifest = parent.manifest
 
-        for entry in self._materialize_s3_entries(
-            source_uri=source_uri,
-            identity_mode=identity_mode,
-            path_patterns=path_patterns,
-        ):
-            index[entry.path] = entry
-
-        def iter_entries() -> Iterator[ManifestEntry]:
-            for path in sorted(index):
-                yield index[path]
-
-        temp_manifest = self._write_temp_manifest(iter_entries())
+        temp_manifest = self._write_temp_manifest(
+            _merge_sorted_entry_streams(
+                base_entries=(
+                    self.store.iter_manifest_entries(parent_manifest)
+                    if parent_manifest
+                    else None
+                ),
+                new_entries=self._materialize_s3_entries(
+                    source_uri=source_uri,
+                    identity_mode=identity_mode,
+                    path_patterns=path_patterns,
+                ),
+            )
+        )
         manifest_hash = blake3_digest_file(temp_manifest)
         self._persist_manifest(temp_manifest, manifest_hash)
 
@@ -554,55 +576,80 @@ class FluxelRepository:
     def diff(self, from_ref: str, to_ref: str) -> list[DiffEntry]:
         from_commit = self.read_commit(self.resolve_ref(from_ref))
         to_commit = self.read_commit(self.resolve_ref(to_ref))
-        from_entries = self._manifest_index(from_commit.manifest)
-        to_entries = self._manifest_index(to_commit.manifest)
+
+        from_iter = self.store.iter_manifest_entries(from_commit.manifest)
+        to_iter = self.store.iter_manifest_entries(to_commit.manifest)
 
         changes: list[DiffEntry] = []
+        from_entry = next(from_iter, None)
+        to_entry = next(to_iter, None)
 
-        from_only = sorted(set(from_entries) - set(to_entries))
-        for path in from_only:
-            before = from_entries[path]
-            changes.append(
-                DiffEntry(
-                    path=path,
-                    change="removed",
-                    before_hash=before.hash,
-                    after_hash=None,
-                    before_size=before.size,
-                    after_size=None,
+        while from_entry is not None or to_entry is not None:
+            if from_entry is None:
+                changes.append(
+                    DiffEntry(
+                        path=to_entry.path,
+                        change="added",
+                        before_hash=None,
+                        after_hash=to_entry.hash,
+                        before_size=None,
+                        after_size=to_entry.size,
+                    )
                 )
-            )
-
-        to_only = sorted(set(to_entries) - set(from_entries))
-        for path in to_only:
-            after = to_entries[path]
-            changes.append(
-                DiffEntry(
-                    path=path,
-                    change="added",
-                    before_hash=None,
-                    after_hash=after.hash,
-                    before_size=None,
-                    after_size=after.size,
+                to_entry = next(to_iter, None)
+            elif to_entry is None:
+                changes.append(
+                    DiffEntry(
+                        path=from_entry.path,
+                        change="removed",
+                        before_hash=from_entry.hash,
+                        after_hash=None,
+                        before_size=from_entry.size,
+                        after_size=None,
+                    )
                 )
-            )
-
-        shared = sorted(set(from_entries) & set(to_entries))
-        for path in shared:
-            before = from_entries[path]
-            after = to_entries[path]
-            if before.hash == after.hash and before.size == after.size:
-                continue
-            changes.append(
-                DiffEntry(
-                    path=path,
-                    change="modified",
-                    before_hash=before.hash,
-                    after_hash=after.hash,
-                    before_size=before.size,
-                    after_size=after.size,
+                from_entry = next(from_iter, None)
+            elif from_entry.path == to_entry.path:
+                if (
+                    from_entry.hash != to_entry.hash
+                    or from_entry.size != to_entry.size
+                ):
+                    changes.append(
+                        DiffEntry(
+                            path=from_entry.path,
+                            change="modified",
+                            before_hash=from_entry.hash,
+                            after_hash=to_entry.hash,
+                            before_size=from_entry.size,
+                            after_size=to_entry.size,
+                        )
+                    )
+                from_entry = next(from_iter, None)
+                to_entry = next(to_iter, None)
+            elif from_entry.path < to_entry.path:
+                changes.append(
+                    DiffEntry(
+                        path=from_entry.path,
+                        change="removed",
+                        before_hash=from_entry.hash,
+                        after_hash=None,
+                        before_size=from_entry.size,
+                        after_size=None,
+                    )
                 )
-            )
+                from_entry = next(from_iter, None)
+            else:
+                changes.append(
+                    DiffEntry(
+                        path=to_entry.path,
+                        change="added",
+                        before_hash=None,
+                        after_hash=to_entry.hash,
+                        before_size=None,
+                        after_size=to_entry.size,
+                    )
+                )
+                to_entry = next(to_iter, None)
 
         return changes
 
@@ -810,28 +857,22 @@ class FluxelRepository:
 
     def _materialize_blobs_and_entries(
         self, *, identity_mode: str
-    ) -> Iterator[ManifestEntry]:
-        for file_path in walk_files(self.root):
-            stat = file_path.stat()
-            relative_path = file_path.relative_to(self.root).as_posix()
-            source_uri = file_path.as_uri()
+    ) -> Iterator[str]:
+        for entry in walk_files(self.root):
+            relative_path = entry.path.relative_to(self.root).as_posix()
             if identity_mode == "blake3":
-                identity_value = blake3_digest_file(file_path)
-                blob_hash = identity_value
-                self._store_blob(file_path, blob_hash)
+                identity_value = blake3_digest_file(entry.path)
+                self._store_blob(entry.path, identity_value)
+                yield json.dumps(
+                    ["b", relative_path, identity_value, entry.size, entry.mtime_ns],
+                    separators=(",", ":"),
+                )
             else:
-                identity_value = metadata_identity(relative_path, stat.st_size)
-                blob_hash = None
-            yield ManifestEntry(
-                path=relative_path,
-                hash=identity_value,
-                size=stat.st_size,
-                mtime_ns=stat.st_mtime_ns,
-                identity_mode=identity_mode,
-                identity_value=identity_value,
-                blob_hash=blob_hash,
-                source_uri=source_uri,
-            )
+                identity_value = metadata_identity(relative_path, entry.size)
+                yield json.dumps(
+                    ["m", relative_path, identity_value, entry.size, entry.mtime_ns, entry.path.as_uri()],
+                    separators=(",", ":"),
+                )
 
     def _materialize_s3_entries(
         self,
@@ -921,11 +962,25 @@ class FluxelRepository:
                 identity_mode=identity_mode,
                 store_blob=store_blob,
             )
-        return self._entry_from_working_path(
-            change.path,
-            identity_mode,
-            store_blob=store_blob,
-        )
+        source_path = self.root / change.path
+        if source_path.exists():
+            return self._entry_from_working_path(
+                change.path,
+                identity_mode,
+                store_blob=store_blob,
+            )
+        if change.blob_hash and identity_mode == "blake3":
+            return ManifestEntry(
+                path=change.path,
+                hash=change.blob_hash,
+                size=change.size or 0,
+                mtime_ns=0,
+                identity_mode="blake3",
+                identity_value=change.blob_hash,
+                blob_hash=change.blob_hash,
+                source_uri=None,
+            )
+        raise FileNotFoundError(f"Cannot stage missing file: {change.path}")
 
     def _entry_from_source_uri(
         self,
@@ -1012,12 +1067,12 @@ class FluxelRepository:
         )
 
         staged_entries: list[tuple[str, str]] = []
-        for file_path in walk_files(source_path):
-            relative_suffix = file_path.relative_to(source_path).as_posix()
+        for file_entry in walk_files(source_path):
+            relative_suffix = file_entry.path.relative_to(source_path).as_posix()
             logical_path = normalize_repository_path(
                 PurePosixPath(destination_prefix, relative_suffix).as_posix()
             )
-            staged_entries.append((logical_path, file_path.as_uri()))
+            staged_entries.append((logical_path, file_entry.path.as_uri()))
 
         if not staged_entries:
             raise FileNotFoundError(f"Cannot stage empty directory: {raw_source}")
@@ -1119,12 +1174,7 @@ class FluxelRepository:
             self.client_state.write_staging_payload(branch, None)
             return
         payload = [
-            {
-                "path": change.path,
-                "action": change.action,
-                "identity_mode": change.identity_mode,
-                "source_uri": change.source_uri,
-            }
+            _stage_change_dict(change)
             for change in sorted(staged.values(), key=lambda item: item.path)
         ]
         self.client_state.write_staging_payload(
@@ -1220,31 +1270,40 @@ class FluxelRepository:
             raise ValueError(f"No staged changes for branch: {branch_state.branch}")
 
         parent_commit = branch_state.commit_id
-        index: dict[str, ManifestEntry]
-        if parent_commit:
-            parent = self.read_commit(parent_commit)
-            index = self._manifest_index(parent.manifest)
-        else:
-            index = {}
 
+        removed_paths: set[str] = set()
+        added_entries: list[ManifestEntry] = []
         for change in staged.values():
             if change.action == "remove":
-                index.pop(change.path, None)
-                continue
-            if change.action == "add":
-                index[change.path] = self._entry_from_stage_change(
-                    change,
-                    change.identity_mode or "blake3",
-                    store_blob=True,
+                removed_paths.add(change.path)
+            elif change.action == "add":
+                added_entries.append(
+                    self._entry_from_stage_change(
+                        change,
+                        change.identity_mode or "blake3",
+                        store_blob=True,
+                    )
                 )
-                continue
-            raise ValueError(f"Unknown stage action: {change.action}")
+            else:
+                raise ValueError(f"Unknown stage action: {change.action}")
+        added_entries.sort(key=lambda e: e.path)
 
-        def iter_entries() -> Iterator[ManifestEntry]:
-            for path in sorted(index):
-                yield index[path]
+        parent_manifest: str | None = None
+        if parent_commit:
+            parent = self.read_commit(parent_commit)
+            parent_manifest = parent.manifest
 
-        temp_manifest = self._write_temp_manifest(iter_entries())
+        temp_manifest = self._write_temp_manifest(
+            _merge_sorted_entry_streams(
+                base_entries=(
+                    self.store.iter_manifest_entries(parent_manifest)
+                    if parent_manifest
+                    else None
+                ),
+                new_entries=iter(added_entries),
+                removed_paths=removed_paths,
+            )
+        )
         manifest_hash = blake3_digest_file(temp_manifest)
         self._persist_manifest(temp_manifest, manifest_hash)
 
@@ -1346,7 +1405,7 @@ class FluxelRepository:
             current_commit_id=current_state.commit_id if current_state else None,
         )
 
-    def _write_temp_manifest(self, entries: Iterator[ManifestEntry]) -> Path:
+    def _write_temp_manifest(self, entries: Iterator[ManifestEntry | str]) -> Path:
         with NamedTemporaryFile(
             mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
         ) as temp:
@@ -1368,8 +1427,73 @@ def _matches_logical_prefix(path: str, logical_prefix: str) -> bool:
     return path == logical_prefix or path.startswith(f"{logical_prefix}/")
 
 
-def _matches_logical_prefix(path: str, logical_prefix: str) -> bool:
-    return path == logical_prefix or path.startswith(f"{logical_prefix}/")
+def _stage_change_dict(change: StageChange) -> dict[str, object]:
+    d: dict[str, object] = {
+        "path": change.path,
+        "action": change.action,
+    }
+    if change.identity_mode is not None:
+        d["identity_mode"] = change.identity_mode
+    if change.source_uri is not None:
+        d["source_uri"] = change.source_uri
+    if change.blob_hash is not None:
+        d["blob_hash"] = change.blob_hash
+    if change.size is not None:
+        d["size"] = change.size
+    return d
+
+
+def _path_is_removed(path: str, removed: set[str]) -> bool:
+    if path in removed:
+        return True
+    for rp in removed:
+        if path.startswith(f"{rp}/"):
+            return True
+    return False
+
+
+def _merge_sorted_entry_streams(
+    base_entries: Iterator[ManifestEntry] | None,
+    new_entries: Iterator[ManifestEntry],
+    removed_paths: set[str] = frozenset(),
+) -> Iterator[ManifestEntry]:
+    """Merge two sorted entry streams without loading either fully in memory.
+
+    Both iterators MUST yield entries sorted by path in ascending order.
+    new_entries wins on path conflict (overwrite semantics).
+    Paths in removed_paths (and their descendants) are excluded from the base stream.
+
+    O(1) memory, O(N) time.
+    """
+    if base_entries is None:
+        yield from new_entries
+        return
+
+    base = next(base_entries, None)
+    new = next(new_entries, None)
+
+    while base is not None or new is not None:
+        if base is None:
+            yield new
+            new = next(new_entries, None)
+        elif new is None:
+            if not _path_is_removed(base.path, removed_paths):
+                yield base
+            base = next(base_entries, None)
+        elif base.path == new.path:
+            # New wins: skip the base entry, emit the new one
+            if new.path not in removed_paths:
+                yield new
+            base = next(base_entries, None)
+            new = next(new_entries, None)
+        elif base.path < new.path:
+            if not _path_is_removed(base.path, removed_paths):
+                yield base
+            base = next(base_entries, None)
+        else:
+            if new.path not in removed_paths:
+                yield new
+            new = next(new_entries, None)
 
 
 def open_repository(
@@ -1378,7 +1502,11 @@ def open_repository(
     worktree: str | Path | None = None,
     client_root: str | Path | None = None,
     s3_client: object | None = None,
+    blob_transfer: BlobTransferBackend | str | None = None,
 ) -> FluxelRepository:
+    if isinstance(blob_transfer, str):
+        blob_transfer = build_blob_transfer_backend(blob_transfer)
+
     if isinstance(root, str) and root.startswith("s3://"):
         bucket, prefix = parse_s3_uri(root)
         worktree_root = Path(worktree or ".").resolve()
@@ -1394,6 +1522,7 @@ def open_repository(
                 prefix,
                 client=s3_client,
                 branch_root=worktree_root / ".fluxel" / "refs" / "heads",
+                blob_transfer=blob_transfer,
             ),
             client_state=LocalClientState(resolved_client_root),
         )
@@ -1415,8 +1544,9 @@ def commit(
     *,
     staged: bool = False,
     ref: str | None = None,
+    blob_transfer: BlobTransferBackend | str | None = None,
 ) -> str:
-    return open_repository(root).commit(
+    return open_repository(root, blob_transfer=blob_transfer).commit(
         message,
         identity_mode=identity_mode,
         staged=staged,
@@ -1432,8 +1562,9 @@ def import_s3(
     *,
     path_patterns: list[str] | None = None,
     ref: str | None = None,
+    blob_transfer: BlobTransferBackend | str | None = None,
 ) -> str:
-    return open_repository(root).import_s3(
+    return open_repository(root, blob_transfer=blob_transfer).import_s3(
         source_uri,
         message,
         identity_mode=identity_mode,
@@ -1457,8 +1588,9 @@ def add(
     ref: str | None = None,
     identity_mode: str = "blake3",
     destination_path: str | None = None,
+    blob_transfer: BlobTransferBackend | str | None = None,
 ) -> StageStatus:
-    return open_repository(root).add(
+    return open_repository(root, blob_transfer=blob_transfer).add(
         paths,
         ref=ref,
         identity_mode=identity_mode,
@@ -1496,6 +1628,63 @@ def move(
     )
 
 
+def move_staged(
+    root: str | Path,
+    source_path: str,
+    destination_path: str,
+    *,
+    ref: str | None = None,
+) -> StageStatus:
+    """Stage a move operation without committing."""
+    repo = open_repository(root)
+    branch = ref or repo.current_branch()
+    repo._ensure_branch_exists(branch)
+    stage = repo._load_stage(branch)
+
+    source = normalize_repository_path(source_path)
+    destination = normalize_repository_path(destination_path)
+
+    if source == destination:
+        raise ValueError("Source and destination paths must differ")
+
+    # Find all entries matching the source path in the current manifest
+    base_commit = repo.read_commit(repo.resolve_ref(branch))
+    moved_count = 0
+
+    for entry in repo.store.iter_manifest_entries(base_commit.manifest):
+        if not matches_logical_path(entry.path, source):
+            continue
+
+        moved_path = move_logical_path(
+            entry.path,
+            source_path=source,
+            destination_path=destination,
+        )
+
+        # Stage the remove + add as separate operations
+        stage[entry.path] = StageChange(
+            path=entry.path,
+            action="remove",
+            identity_mode=None,
+            source_uri=None,
+        )
+        stage[moved_path] = StageChange(
+            path=moved_path,
+            action="add",
+            identity_mode=entry.identity_mode,
+            source_uri=entry.source_uri,
+            blob_hash=entry.blob_hash,
+            size=entry.size,
+        )
+        moved_count += 1
+
+    if moved_count == 0:
+        raise FileNotFoundError(f"Path not found in branch '{branch}': {source}")
+
+    repo._save_stage(branch, stage)
+    return repo.status(ref=branch)
+
+
 def status(root: str | Path, *, ref: str | None = None) -> StageStatus:
     return open_repository(root).status(ref=ref)
 
@@ -1510,7 +1699,8 @@ def verify(
     path_prefixes: list[str] | None = None,
     *,
     dry_run: bool = False,
+    blob_transfer: BlobTransferBackend | str | None = None,
 ) -> VerifyResult:
-    return open_repository(root).verify(
+    return open_repository(root, blob_transfer=blob_transfer).verify(
         ref=ref, path_prefixes=path_prefixes, dry_run=dry_run
     )

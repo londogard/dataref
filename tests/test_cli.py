@@ -88,23 +88,35 @@ def test_cli_metadata_only_rm_and_mv_work_for_s3_repositories(
                 repo_uri,
                 "a.txt",
                 "renamed.txt",
-                "-m",
-                "rename a",
             ]
         )
         == 0
     )
     mv_payload = json.loads(capsys.readouterr().out)
-    assert mv_payload["moved_paths"] == ["renamed.txt"]
-    moved_commit = mv_payload["commit_id"]
+    assert mv_payload["added"] == ["renamed.txt"]
+    assert mv_payload["removed"] == ["a.txt"]
 
-    assert run_cli(["rm", "--repo", repo_uri, "dir", "-m", "remove dir"]) == 0
+    assert run_cli(["rm", "--repo", repo_uri, "dir"]) == 0
     rm_payload = json.loads(capsys.readouterr().out)
-    assert rm_payload["removed_paths"] == ["dir/b.txt"]
-    removed_commit = rm_payload["commit_id"]
-    assert removed_commit != moved_commit
+    assert rm_payload["removed"] == ["a.txt", "dir"]
 
-    assert run_cli(["diff", "--repo", repo_uri, initial_commit, removed_commit]) == 0
+    assert (
+        run_cli(
+            [
+                "commit",
+                "--repo",
+                repo_uri,
+                "--staged",
+                "-m",
+                "rename and remove",
+            ]
+        )
+        == 0
+    )
+    commit_id = capsys.readouterr().out.strip()
+    assert len(commit_id) == 64
+
+    assert run_cli(["diff", "--repo", repo_uri, initial_commit, commit_id]) == 0
     diff_payload = json.loads(capsys.readouterr().out)
     assert [(entry["path"], entry["change"]) for entry in diff_payload] == [
         ("a.txt", "removed"),
@@ -113,7 +125,7 @@ def test_cli_metadata_only_rm_and_mv_work_for_s3_repositories(
     ]
 
     assert not list((tmp_path / ".fluxel" / "commits").glob("*.json"))
-    assert f"repos/demo/commits/{removed_commit}.json" in client._objects
+    assert f"repos/demo/commits/{commit_id}.json" in client._objects
 
 
 def test_cli_commit_branch_and_diff(tmp_path: Path, capsys) -> None:

@@ -18,7 +18,7 @@ from .manifest_index import (
     iter_manifest_index_entry_jsons,
     lookup_manifest_index_entry_json,
 )
-from .storage import OptimisticLockError
+from .storage import BlobTransferBackend, OptimisticLockError
 
 
 RepositoryObjectKind = Literal["blob", "commit", "manifest", "manifest-index", "ref"]
@@ -303,6 +303,7 @@ class S3RepositoryStore(RepositoryStore):
         client: object | None = None,
         branch_root: str | Path | None = None,
         lock_timeout_seconds: int = DEFAULT_BRANCH_LOCK_TIMEOUT_SECONDS,
+        blob_transfer: BlobTransferBackend | None = None,
     ) -> None:
         self.bucket = bucket
         self.prefix = prefix.strip("/")
@@ -310,6 +311,7 @@ class S3RepositoryStore(RepositoryStore):
         self.branch_root = Path(branch_root).resolve() if branch_root else None
         self.lock_timeout_seconds = max(1, lock_timeout_seconds)
         self._manifest_index_cache: dict[str, Path] = {}
+        self._blob_transfer = blob_transfer
 
     def read_commit_bytes(self, commit_id: str) -> bytes | None:
         try:
@@ -454,7 +456,18 @@ class S3RepositoryStore(RepositoryStore):
         finally:
             self._release_branch_lock(branch, lock_token)
 
+    def _blob_uri(self, blob_hash: str) -> str:
+        return f"s3://{self.bucket}/{self._key('blob', blob_hash)}"
+
     def read_blob_bytes(self, blob_hash: str) -> bytes:
+        if self._blob_transfer is not None:
+            with NamedTemporaryFile(delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                self._blob_transfer.download(self._blob_uri(blob_hash), tmp_path)
+                return Path(tmp_path).read_bytes()
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
         response = self.client.get_object(
             Bucket=self.bucket,
             Key=self._key("blob", blob_hash),
@@ -506,6 +519,15 @@ class S3RepositoryStore(RepositoryStore):
         *,
         if_missing: bool = True,
     ) -> None:
+        if self._blob_transfer is not None:
+            if if_missing and self.object_exists("blob", blob_hash):
+                return
+            self._blob_transfer.upload(
+                str(source_path),
+                self._blob_uri(blob_hash),
+                if_not_exists=if_missing,
+            )
+            return
         with Path(source_path).open("rb") as handle:
             self._put_stream(
                 key=self._key("blob", blob_hash),
@@ -515,6 +537,8 @@ class S3RepositoryStore(RepositoryStore):
             )
 
     def object_exists(self, kind: RepositoryObjectKind, object_id: str) -> bool:
+        if kind == "blob" and self._blob_transfer is not None:
+            return self._blob_transfer.exists(self._blob_uri(object_id))
         try:
             self.client.head_object(Bucket=self.bucket, Key=self._key(kind, object_id))
             return True

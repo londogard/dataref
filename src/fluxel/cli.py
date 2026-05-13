@@ -19,14 +19,12 @@ from .core import (
     drop_analytical_index,
     import_s3,
     merge,
-    move,
+    move_staged,
     query_analytical_index,
-    remove,
     rm,
     status,
     verify,
 )
-
 
 IdentityMode = Literal["blake3", "meta"]
 HANDLED_CLI_ERRORS = (
@@ -56,6 +54,11 @@ class CommitArgs:
         help="Commit only staged changes for a branch",
     )
     ref: str | None = None  # Branch ref to update (defaults to current branch)
+    transfer_backend: str | None = field(
+        default=None,
+        alias=["--transfer-backend", "--backend"],
+        help="Blob transfer backend (boto3 or s5cmd)",
+    )
 
 
 @dataclass
@@ -79,6 +82,11 @@ class ImportArgs:
         help="Repository path or URI",
     )
     ref: str | None = None  # Branch ref to update (defaults to current branch)
+    transfer_backend: str | None = field(
+        default=None,
+        alias=["--transfer-backend", "--backend"],
+        help="Blob transfer backend (boto3 or s5cmd)",
+    )
 
 
 @dataclass
@@ -101,16 +109,16 @@ class AddArgs:
         default=None,
         help="Branch ref for staging (defaults to current branch)",
     )
+    transfer_backend: str | None = field(
+        default=None,
+        alias=["--transfer-backend", "--backend"],
+        help="Blob transfer backend (boto3 or s5cmd)",
+    )
 
 
 @dataclass
 class RmArgs:
     paths: list[str] = field(positional=True, nargs="+", help="Paths to remove")
-    message: str | None = field(
-        default=None,
-        alias=["-m", "--message"],
-        help="Commit message for a metadata-only removal",
-    )
     root: str = field(
         default=".",
         alias="--repo",
@@ -119,10 +127,6 @@ class RmArgs:
     ref: str | None = field(
         default=None,
         help="Branch ref for staging (defaults to current branch)",
-    )
-    staged: bool = flag(
-        False,
-        help="Stage removals instead of writing a metadata-only commit",
     )
 
 
@@ -133,7 +137,6 @@ class MoveArgs:
         positional=True,
         help="Destination path or prefix",
     )
-    message: str = field(alias=["-m", "--message"], help="Commit message")
     root: str = field(
         default=".",
         alias="--repo",
@@ -141,7 +144,7 @@ class MoveArgs:
     )
     ref: str | None = field(
         default=None,
-        help="Branch ref to update (defaults to current branch)",
+        help="Branch ref for staging (defaults to current branch)",
     )
 
 
@@ -208,6 +211,11 @@ class VerifyArgs:
         False,
         alias="--dry-run",
         help="Report entries that would be verified without writing blobs or commits",
+    )
+    transfer_backend: str | None = field(
+        default=None,
+        alias=["--transfer-backend", "--backend"],
+        help="Blob transfer backend (boto3 or s5cmd)",
     )
 
 
@@ -356,6 +364,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 identity_mode=command.identity,
                 staged=command.staged,
                 ref=command.ref,
+                blob_transfer=command.transfer_backend,
             )
             print(commit_id)
             return 0
@@ -368,6 +377,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 identity_mode=command.identity,
                 path_patterns=_flatten_option_values(command.path_patterns),
                 ref=command.ref,
+                blob_transfer=command.transfer_backend,
             )
             print(commit_id)
             return 0
@@ -379,60 +389,24 @@ def run_cli(argv: list[str] | None = None) -> int:
                 ref=command.ref,
                 identity_mode=command.identity,
                 destination_path=command.destination_path,
+                blob_transfer=command.transfer_backend,
             )
             print(json.dumps(_stage_payload(stage), indent=2))
             return 0
 
         if isinstance(command, RmArgs):
-            if command.message is not None and command.staged:
-                print(
-                    "rm error: cannot combine --message with --staged",
-                    file=sys.stderr,
-                )
-                return 2
-            if command.message is not None:
-                result = remove(
-                    root=command.root,
-                    paths=command.paths,
-                    message=command.message,
-                    ref=command.ref,
-                )
-                print(
-                    json.dumps(
-                        {
-                            "ref": result.ref,
-                            "commit_id": result.commit_id,
-                            "removed_paths": result.removed_paths,
-                        },
-                        indent=2,
-                    )
-                )
-                return 0
-
             stage = rm(root=command.root, paths=command.paths, ref=command.ref)
             print(json.dumps(_stage_payload(stage), indent=2))
             return 0
 
         if isinstance(command, MoveArgs):
-            result = move(
+            stage = move_staged(
                 root=command.root,
                 source_path=command.source_path,
                 destination_path=command.destination_path,
-                message=command.message,
                 ref=command.ref,
             )
-            print(
-                json.dumps(
-                    {
-                        "ref": result.ref,
-                        "commit_id": result.commit_id,
-                        "source_path": result.source_path,
-                        "destination_path": result.destination_path,
-                        "moved_paths": result.moved_paths,
-                    },
-                    indent=2,
-                )
-            )
+            print(json.dumps(_stage_payload(stage), indent=2))
             return 0
 
         if isinstance(command, StatusArgs):
@@ -493,6 +467,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 ref=command.ref,
                 path_prefixes=_flatten_option_values(command.path),
                 dry_run=command.dry_run,
+                blob_transfer=command.transfer_backend,
             )
             payload = {
                 "commit_id": result.commit_id,

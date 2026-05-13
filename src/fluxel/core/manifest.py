@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from json import JSONDecodeError
 from pathlib import Path
@@ -229,12 +230,15 @@ class ManifestWriter:
     def __init__(self, manifest_path: str | Path) -> None:
         self.manifest_path = Path(manifest_path)
 
-    def write_entries(self, entries: Iterable[ManifestEntry]) -> int:
+    def write_entries(self, entries: Iterable[ManifestEntry | str]) -> int:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         written = 0
         with self.manifest_path.open("w", encoding="utf-8") as handle:
             for entry in entries:
-                handle.write(serialize_manifest_entry(entry))
+                if isinstance(entry, str):
+                    handle.write(entry)
+                else:
+                    handle.write(serialize_manifest_entry(entry))
                 handle.write("\n")
                 written += 1
         return written
@@ -309,17 +313,32 @@ def build_manifest_entries(
         )
 
 
-def walk_files(root: str | Path) -> Iterator[Path]:
+@dataclass(frozen=True)
+class FileEntry:
+    path: Path
+    size: int
+    mtime_ns: int
+
+
+def walk_files(root: str | Path) -> Iterator[FileEntry]:
     root_path = Path(root).resolve()
 
-    def iter_dir(path: Path) -> Iterator[Path]:
-        for child in sorted(path.iterdir(), key=lambda item: item.name):
-            if child.name == ".fluxel":
+    def iter_dir(path: Path) -> Iterator[FileEntry]:
+        try:
+            entries = sorted(os.scandir(path), key=lambda entry: entry.name)
+        except PermissionError:
+            return
+        for entry in entries:
+            if entry.name == ".fluxel":
                 continue
-            if child.is_dir():
-                yield from iter_dir(child)
-                continue
-            if child.is_file():
-                yield child
+            if entry.is_dir(follow_symlinks=False):
+                yield from iter_dir(Path(entry.path))
+            elif entry.is_file(follow_symlinks=False):
+                stat = entry.stat()
+                yield FileEntry(
+                    path=Path(entry.path),
+                    size=stat.st_size,
+                    mtime_ns=stat.st_mtime_ns,
+                )
 
     yield from iter_dir(root_path)

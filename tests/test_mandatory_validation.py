@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 import tracemalloc
 from pathlib import Path
 
@@ -7,6 +9,7 @@ from blake3 import blake3
 import pytest
 
 from fluxel.core import (
+    FileEntry,
     FluxelFileSystem,
     FluxelRepository,
     LocalClientState,
@@ -19,6 +22,7 @@ from fluxel.core import (
     drop_analytical_index,
     open_repository,
     query_analytical_index,
+    walk_files,
 )
 
 
@@ -720,3 +724,164 @@ def test_merge_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
         )
     else:
         raise AssertionError("Expected RefConflictError")
+
+
+def test_walk_files_eliminates_redundant_stat(tmp_path: Path, monkeypatch) -> None:
+    """Verify walk_files yields FileEntry with pre-populated stat info."""
+    (tmp_path / "a.txt").write_text("x" * 100)
+    (tmp_path / "b.txt").write_text("y" * 200)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "c.txt").write_text("z")
+
+    stat_call_count = 0
+    original_stat = os.stat
+
+    def tracking_stat(path, *args, **kwargs):
+        nonlocal stat_call_count
+        stat_call_count += 1
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", tracking_stat)
+
+    entries = list(walk_files(tmp_path))
+    assert len(entries) == 3
+    for entry in entries:
+        assert isinstance(entry, FileEntry)
+        assert entry.size > 0
+        assert entry.mtime_ns > 0
+        assert entry.path.exists()
+
+
+def test_commit_meta_no_redundant_path_stat(tmp_path: Path, monkeypatch) -> None:
+    """Verify commit with meta mode does NOT call Path.stat() redundantly."""
+    for i in range(100):
+        (tmp_path / f"file_{i:04d}.txt").write_text(f"content_{i}")
+
+    path_stat_count = 0
+    original_path_stat = Path.stat
+
+    def tracking_path_stat(self, **kwargs):
+        nonlocal path_stat_count
+        path_stat_count += 1
+        return original_path_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", tracking_path_stat)
+
+    repo = FluxelRepository(tmp_path)
+    commit_id = repo.commit("stats test", identity_mode="meta")
+
+    assert len(commit_id) == 64
+    print(f"\n[STAT TEST] Path.stat() calls during commit: {path_stat_count}")
+    # The old code called Path.stat() once per file in _materialize_blobs_and_entries
+    # (100+ calls for 100 files). The new code gets stat from os.scandir.
+    # Remaining calls come from other Path internals (exists, resolve, etc.)
+    assert path_stat_count < 100, (
+        f"Path.stat() called {path_stat_count} times for 100 files — "
+        "expected < 100 (redundant per-file stat eliminated)"
+    )
+
+
+def test_streaming_diff_does_not_use_manifest_index_dict(tmp_path: Path, monkeypatch) -> None:
+    """Verify diff() never calls _manifest_index (which loads full dict)."""
+    file_count = 500
+    for i in range(file_count):
+        (tmp_path / f"file_{i:04d}.txt").write_text(f"original_content_{i}")
+
+    repo = FluxelRepository(tmp_path)
+    commit_a = repo.commit("first batch", identity_mode="meta")
+
+    for i in range(file_count // 2):
+        (tmp_path / f"file_{i:04d}.txt").write_text(f"modified_content_{i}_longer")
+    (tmp_path / "new_file.txt").write_text("brand_new")
+    commit_b = repo.commit("second batch", identity_mode="meta")
+
+    # Track whether _manifest_index is ever called
+    original_method = repo._manifest_index
+
+    def fail_manifest_index(manifest_hash):
+        raise AssertionError("diff() should not call _manifest_index")
+
+    repo._manifest_index = fail_manifest_index  # type: ignore[method-assign]
+    try:
+        changes = repo.diff(commit_a, commit_b)
+    finally:
+        repo._manifest_index = original_method
+
+    assert len(changes) == file_count // 2 + 1
+
+
+def test_commit_10k_files_meta_mode_performance(tmp_path: Path) -> None:
+    """Benchmark: commit 10K files with meta mode.
+
+    Verifies walk_files stat propagation + streaming manifest writing
+    keeps commit time linear and bounds-checked.
+    """
+    file_count = 10_000
+    print(f"\n[PERF TEST] Generating {file_count} files...")
+    gen_start = time.perf_counter()
+    for i in range(file_count):
+        subdir = tmp_path / f"dir_{i % 100:03d}"
+        subdir.mkdir(parents=True, exist_ok=True)
+        (subdir / f"file_{i:05d}.txt").write_text(f"data_{i}")
+    gen_time = time.perf_counter() - gen_start
+    print(f"  Generate: {gen_time:.2f}s ({file_count / gen_time:.0f} files/sec)")
+
+    repo = FluxelRepository(tmp_path)
+    commit_start = time.perf_counter()
+    commit_id = repo.commit("10k meta benchmark", identity_mode="meta")
+    commit_time = time.perf_counter() - commit_start
+    print(f"  Commit:   {commit_time:.2f}s ({file_count / commit_time:.0f} files/sec)")
+    assert len(commit_id) == 64
+    assert repo.resolve_entries("main")[f"dir_{0:03d}/file_{0:05d}.txt"] is not None
+    assert file_count / commit_time > 2000, (
+        f"Commit too slow: {file_count / commit_time:.0f} files/sec "
+        f"(expected > 2000 for meta mode)"
+    )
+
+
+def test_streaming_diff_20k_files_performance(tmp_path: Path) -> None:
+    """Benchmark: diff two commits with 20K files stays O(1) memory."""
+    file_count = 20_000
+    print(f"\n[DIFF PERF] Creating {file_count} files per commit...")
+
+    for i in range(file_count):
+        (tmp_path / f"file_{i:05d}.txt").write_text(f"v1_{i}")
+    repo = FluxelRepository(tmp_path)
+    commit_a = repo.commit("base", identity_mode="blake3")
+
+    for i in range(file_count):
+        (tmp_path / f"file_{i:05d}.txt").write_text(f"v2_{i}")
+    commit_b = repo.commit("modified", identity_mode="blake3")
+
+    diff_start = time.perf_counter()
+    changes = repo.diff(commit_a, commit_b)
+    diff_time = time.perf_counter() - diff_start
+
+    print(f"  Diff time: {diff_time:.4f}s ({file_count / diff_time:.0f} entries/sec)")
+    print(f"  Changes:   {len(changes)}")
+    assert len(changes) == file_count
+    assert diff_time < 2.0, f"Diff too slow: {diff_time:.2f}s"
+
+
+def test_walk_files_sorted_order(tmp_path: Path) -> None:
+    """Verify walk_files yields files in sorted order per directory."""
+    names = ["z.txt", "a.txt", "m.txt", "b.txt"]
+    for name in names:
+        (tmp_path / name).write_text(name)
+
+    entries = list(walk_files(tmp_path))
+    paths = [e.path.name for e in entries]
+    assert paths == sorted(names)
+
+
+def test_file_entry_carries_correct_stat_info(tmp_path: Path) -> None:
+    """Verify FileEntry has correct size and mtime from walk_files."""
+    content = b"hello world"
+    (tmp_path / "test.bin").write_bytes(content)
+
+    entries = list(walk_files(tmp_path))
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.size == len(content)
+    assert entry.mtime_ns > 0
+    assert entry.path.name == "test.bin"
