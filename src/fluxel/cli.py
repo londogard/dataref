@@ -24,6 +24,9 @@ from .core import (
     rm,
     status,
     verify,
+    log,
+    checkout,
+    open_repository,
 )
 
 IdentityMode = Literal["blake3", "meta"]
@@ -172,6 +175,38 @@ class BranchArgs:
 
 
 @dataclass
+class LogArgs:
+    ref: str | None = field(
+        default=None,
+        positional=True,
+        nargs="?",
+        help="Ref (branch or commit) to show log for (defaults to current branch)",
+    )
+    root: str = field(
+        default=".",
+        alias="--repo",
+        help="Repository path or URI",
+    )
+    json: bool = flag(
+        False,
+        help="Print history as structured JSON",
+    )
+
+
+@dataclass
+class CheckoutArgs:
+    name: str = field(
+        positional=True,
+        help="Branch name to switch to",
+    )
+    root: str = field(
+        default=".",
+        alias="--repo",
+        help="Repository path or URI",
+    )
+
+
+@dataclass
 class DiffArgs:
     from_ref: str = field(positional=True, help="Source ref (branch or commit)")
     to_ref: str = field(positional=True, help="Target ref (branch or commit)")
@@ -274,6 +309,8 @@ class FluxelCLI:
         | MergeArgs
         | VerifyArgs
         | IndexArgs
+        | LogArgs
+        | CheckoutArgs
     ) = subparsers(
         {
             "commit": CommitArgs,
@@ -287,6 +324,8 @@ class FluxelCLI:
             "merge": MergeArgs,
             "verify": VerifyArgs,
             "index": IndexArgs,
+            "log": LogArgs,
+            "checkout": CheckoutArgs,
         }
     )
 
@@ -338,6 +377,10 @@ def _command_name(command: object) -> str:
         return "merge"
     if isinstance(command, VerifyArgs):
         return "verify"
+    if isinstance(command, LogArgs):
+        return "log"
+    if isinstance(command, CheckoutArgs):
+        return "checkout"
     if isinstance(command, IndexArgs):
         if isinstance(command.command, IndexBuildArgs):
             return "index build"
@@ -511,6 +554,42 @@ def run_cli(argv: list[str] | None = None) -> int:
                 drop_analytical_index(index_command.db)
                 print("ok")
                 return 0
+
+        if isinstance(command, LogArgs):
+            repo = open_repository(command.root)
+            ref = command.ref or repo.current_branch()
+            commits = list(repo.log(ref))
+            if command.json:
+                payload = [
+                    {
+                        "id": c.id,
+                        "message": c.message,
+                        "manifest": c.manifest,
+                        "parent": c.parent,
+                        "created_at": c.created_at,
+                        "branch": c.branch,
+                    }
+                    for c in commits
+                ]
+                print(json.dumps(payload, indent=2))
+            else:
+                for i, c in enumerate(commits):
+                    if i > 0:
+                        print()
+                    print(f"commit {c.id}")
+                    print(f"Date:   {c.created_at}")
+                    if c.parent:
+                        print(f"Parent: {c.parent}")
+                    print(f"Branch: {c.branch}")
+                    print()
+                    msg_indented = "\n".join(f"    {line}" for line in c.message.splitlines())
+                    print(msg_indented)
+            return 0
+
+        if isinstance(command, CheckoutArgs):
+            checkout(command.root, command.name)
+            print(f"Switched to branch '{command.name}'")
+            return 0
     except HANDLED_CLI_ERRORS as error:
         print(f"{command_name} error: {error}", file=sys.stderr)
         return 2

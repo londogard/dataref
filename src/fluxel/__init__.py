@@ -52,6 +52,8 @@ from .core import (
     status,
     verify,
     walk_files,
+    log,
+    checkout,
 )
 
 __all__ = [
@@ -109,6 +111,8 @@ __all__ = [
     "status",
     "verify",
     "run_cli",
+    "log",
+    "checkout",
     "walk_files",
     "main",
 ]

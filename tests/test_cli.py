@@ -1268,3 +1268,80 @@ def test_cli_meta_import_branch_removal_and_fast_forward_merge(
     assert run_cli(["diff", "--repo", str(tmp_path), "main", "feature"]) == 0
     diff_payload = json.loads(capsys.readouterr().out)
     assert diff_payload == []
+
+
+def test_cli_log_command(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    
+    # 1. Run log on empty main branch (no commits yet)
+    assert run_cli(["log", "--repo", str(tmp_path)]) == 0
+    empty_out = capsys.readouterr().out.strip()
+    assert empty_out == ""
+
+    # 2. Make first commit
+    (tmp_path / "a.txt").write_text("one")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "initial seed"]) == 0
+    commit_a = capsys.readouterr().out.strip()
+
+    # 3. Make second commit
+    (tmp_path / "a.txt").write_text("two")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "update progress"]) == 0
+    commit_b = capsys.readouterr().out.strip()
+
+    # 4. Run log with default format
+    assert run_cli(["log", "--repo", str(tmp_path)]) == 0
+    log_out = capsys.readouterr().out.strip()
+    
+    assert f"commit {commit_b}" in log_out
+    assert f"commit {commit_a}" in log_out
+    assert "Parent: " + commit_a in log_out
+    assert "initial seed" in log_out
+    assert "update progress" in log_out
+    assert log_out.index(commit_b) < log_out.index(commit_a)  # Descendant-first order
+
+    # 5. Run log with --json
+    assert run_cli(["log", "--repo", str(tmp_path), "--json"]) == 0
+    log_json = json.loads(capsys.readouterr().out)
+    
+    assert len(log_json) == 2
+    assert log_json[0]["id"] == commit_b
+    assert log_json[0]["parent"] == commit_a
+    assert log_json[0]["message"] == "update progress"
+    assert log_json[0]["branch"] == "main"
+    assert log_json[1]["id"] == commit_a
+    assert log_json[1]["parent"] is None
+    assert log_json[1]["message"] == "initial seed"
+
+    # 6. Query log starting at a specific commit ref
+    assert run_cli(["log", "--repo", str(tmp_path), commit_a, "--json"]) == 0
+    log_single = json.loads(capsys.readouterr().out)
+    assert len(log_single) == 1
+    assert log_single[0]["id"] == commit_a
+
+
+def test_cli_checkout_command(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    # Make an initial commit on main
+    (tmp_path / "a.txt").write_text("hello")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "first"]) == 0
+    capsys.readouterr()
+
+    # Create branch feature
+    assert run_cli(["branch", "--repo", str(tmp_path), "feature"]) == 0
+    capsys.readouterr()
+
+    # Checkout feature branch
+    assert run_cli(["checkout", "--repo", str(tmp_path), "feature"]) == 0
+    checkout_out = capsys.readouterr().out.strip()
+    assert checkout_out == "Switched to branch 'feature'"
+
+    # Verify current branch is indeed feature
+    assert run_cli(["status", "--repo", str(tmp_path)]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["ref"] == "feature"
+
+    # Attempt checking out non-existent branch should fail
+    assert run_cli(["checkout", "--repo", str(tmp_path), "non-existent"]) == 2
+    err_out = capsys.readouterr().err.strip()
+    assert "Unknown branch: non-existent" in err_out

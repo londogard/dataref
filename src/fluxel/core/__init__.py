@@ -46,6 +46,8 @@ from .repository import (
     rm,
     status,
     verify,
+    log,
+    checkout,
 )
 from .storage import (
     BlobTransferBackend,
@@ -116,6 +118,8 @@ __all__ = [
     "rm",
     "status",
     "verify",
+    "log",
+    "checkout",
     "S3ObjectMetadata",
     "walk_files",
     "iter_s3_objects",

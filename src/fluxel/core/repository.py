@@ -573,6 +573,19 @@ class FluxelRepository:
         self._commit_cache[commit_id] = commit
         return commit
 
+    def log(self, ref: str) -> Iterator[CommitObject]:
+        try:
+            commit_id = self.resolve_ref(ref)
+        except ValueError as e:
+            if "Branch has no commits:" in str(e):
+                return
+            raise
+
+        while commit_id:
+            commit = self.read_commit(commit_id)
+            yield commit
+            commit_id = commit.parent
+
     def diff(self, from_ref: str, to_ref: str) -> list[DiffEntry]:
         from_commit = self.read_commit(self.resolve_ref(from_ref))
         to_commit = self.read_commit(self.resolve_ref(to_ref))
@@ -1704,3 +1717,11 @@ def verify(
     return open_repository(root, blob_transfer=blob_transfer).verify(
         ref=ref, path_prefixes=path_prefixes, dry_run=dry_run
     )
+
+
+def log(root: str | Path, ref: str) -> Iterator[CommitObject]:
+    return open_repository(root).log(ref)
+
+
+def checkout(root: str | Path, branch: str) -> None:
+    open_repository(root).set_current_branch(branch)
