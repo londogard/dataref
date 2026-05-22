@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import shutil
 from datetime import datetime, timezone
@@ -24,7 +25,7 @@ def test_cli_supports_command_local_repo_flag_for_s3_repositories(
 
     assert run_cli(["branch", "--repo", repo_uri, "feature"]) == 0
     branch_out = capsys.readouterr().out.strip()
-    assert branch_out.endswith("/.fluxel/refs/heads/feature")
+    assert branch_out == "Created branch 'feature'"
 
     (tmp_path / "a.txt").write_text("two")
     assert run_cli(["commit", "--repo", repo_uri, "-m", "update"]) == 0
@@ -32,7 +33,7 @@ def test_cli_supports_command_local_repo_flag_for_s3_repositories(
     assert len(commit_b) == 64
     assert commit_a != commit_b
 
-    assert run_cli(["diff", "--repo", repo_uri, commit_a, commit_b]) == 0
+    assert run_cli(["diff", "--repo", repo_uri, commit_a, commit_b, "--json"]) == 0
     diff_payload = json.loads(capsys.readouterr().out)
     assert [entry["path"] for entry in diff_payload] == ["a.txt"]
     assert diff_payload[0]["change"] == "modified"
@@ -116,7 +117,7 @@ def test_cli_metadata_only_rm_and_mv_work_for_s3_repositories(
     commit_id = capsys.readouterr().out.strip()
     assert len(commit_id) == 64
 
-    assert run_cli(["diff", "--repo", repo_uri, initial_commit, commit_id]) == 0
+    assert run_cli(["diff", "--repo", repo_uri, initial_commit, commit_id, "--json"]) == 0
     diff_payload = json.loads(capsys.readouterr().out)
     assert [(entry["path"], entry["change"]) for entry in diff_payload] == [
         ("a.txt", "removed"),
@@ -142,9 +143,9 @@ def test_cli_commit_branch_and_diff(tmp_path: Path, capsys) -> None:
 
     assert run_cli(["branch", "--repo", str(tmp_path), "exp"]) == 0
     branch_out = capsys.readouterr().out.strip()
-    assert branch_out.endswith("/.fluxel/refs/heads/exp")
+    assert branch_out == "Created branch 'exp'"
 
-    assert run_cli(["diff", "--repo", str(tmp_path), commit_a, commit_b]) == 0
+    assert run_cli(["diff", "--repo", str(tmp_path), commit_a, commit_b, "--json"]) == 0
     diff_payload = json.loads(capsys.readouterr().out)
     assert diff_payload == [
         {
@@ -373,12 +374,12 @@ def test_cli_staging_commit_is_branch_scoped(tmp_path: Path, capsys) -> None:
     feature_commit = capsys.readouterr().out.strip()
     assert feature_commit and feature_commit != base_commit
 
-    assert run_cli(["status", "--repo", str(tmp_path), "--ref", "feature"]) == 0
+    assert run_cli(["status", "--repo", str(tmp_path), "--ref", "feature", "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["added"] == []
     assert status_payload["removed"] == []
 
-    assert run_cli(["diff", "--repo", str(tmp_path), "main", "feature"]) == 0
+    assert run_cli(["diff", "--repo", str(tmp_path), "main", "feature", "--json"]) == 0
     diff_payload = json.loads(capsys.readouterr().out)
     assert diff_payload == [
         {
@@ -655,7 +656,7 @@ def test_cli_remote_staged_add_preserves_existing_entries_and_uploads_one_blob(
     }
     assert len(new_blob_keys - initial_blob_keys) == 1
 
-    assert run_cli(["diff", "--repo", repo_uri, first_commit, second_commit]) == 0
+    assert run_cli(["diff", "--repo", repo_uri, first_commit, second_commit, "--json"]) == 0
     diff_payload = json.loads(capsys.readouterr().out)
     assert diff_payload == [
         {
@@ -743,7 +744,7 @@ def test_cli_merge_fast_forwards_target_branch(tmp_path: Path, capsys) -> None:
         "updated": True,
     }
 
-    assert run_cli(["diff", "--repo", str(tmp_path), "main", "feature"]) == 0
+    assert run_cli(["diff", "--repo", str(tmp_path), "main", "feature", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == []
 
 
@@ -1265,7 +1266,7 @@ def test_cli_meta_import_branch_removal_and_fast_forward_merge(
         "fluxel://demo@main/nested/photo1.jpg",
     ]
 
-    assert run_cli(["diff", "--repo", str(tmp_path), "main", "feature"]) == 0
+    assert run_cli(["diff", "--repo", str(tmp_path), "main", "feature", "--json"]) == 0
     diff_payload = json.loads(capsys.readouterr().out)
     assert diff_payload == []
 
@@ -1319,6 +1320,129 @@ def test_cli_log_command(tmp_path: Path, capsys, monkeypatch) -> None:
     assert log_single[0]["id"] == commit_a
 
 
+def test_cli_status_reports_working_tree_changes(tmp_path: Path, capsys) -> None:
+    (tmp_path / "base.txt").write_text("hello")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "initial"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "new.txt").write_text("new file")
+    (tmp_path / "base.txt").write_text("modified content")
+    (tmp_path / "removed.txt").write_text("to be deleted")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "second"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "removed.txt").unlink()
+    (tmp_path / "new.txt").write_text("updated new file")
+    (tmp_path / "another.txt").write_text("added file")
+
+    assert run_cli(["status", "--repo", str(tmp_path), "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert "new.txt" in status["working_tree_modified"]
+    assert "removed.txt" in status["working_tree_removed"]
+    assert "another.txt" in status["working_tree_added"]
+    assert status["added"] == []
+    assert status["removed"] == []
+
+
+def test_cli_status_reports_clean_tree(tmp_path: Path, capsys) -> None:
+    (tmp_path / "a.txt").write_text("content")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+
+    assert run_cli(["status", "--repo", str(tmp_path)]) == 0
+    out = capsys.readouterr().out.strip()
+    assert "Nothing to commit, working tree clean" in out
+
+
+def test_cli_status_reports_staged_and_working_tree_changes(tmp_path: Path, capsys) -> None:
+    (tmp_path / "base.txt").write_text("hello")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "staged.txt").write_text("staged")
+    assert run_cli(["add", "--repo", str(tmp_path), "staged.txt"]) == 0
+    add_payload = json.loads(capsys.readouterr().out)
+    assert add_payload["added"] == ["staged.txt"]
+
+    (tmp_path / "unstaged.txt").write_text("unstaged")
+    (tmp_path / "base.txt").write_text("modified")
+
+    assert run_cli(["status", "--repo", str(tmp_path), "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert "staged.txt" in status["added"]
+    assert "unstaged.txt" in status["working_tree_added"]
+    assert "base.txt" in status["working_tree_modified"]
+
+
+def test_cli_status_on_empty_repo(tmp_path: Path, capsys) -> None:
+    (tmp_path / "f.txt").write_text("x")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "f.txt").unlink()
+
+    assert run_cli(["status", "--repo", str(tmp_path), "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert "f.txt" in status["working_tree_removed"]
+
+
+def test_cli_status_human_readable_format(tmp_path: Path, capsys) -> None:
+    (tmp_path / "a.txt").write_text("hello")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "b.txt").write_text("new")
+    (tmp_path / "a.txt").write_text("world")
+
+    assert run_cli(["status", "--repo", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "modified: a.txt" in out
+    assert "added:    b.txt" in out
+
+
+def test_cli_list_command(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_text("hello")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "b.txt").write_text("world")
+    assert run_cli(["commit", "-m", "init"]) == 0
+    capsys.readouterr()
+
+    assert run_cli(["list"]) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert "a.txt" in out
+    assert "nested/b.txt" in out
+
+    assert run_cli(["list", "nested"]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "nested/b.txt"
+
+
+def test_cli_list_command_json(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_text("hello")
+    assert run_cli(["commit", "-m", "init"]) == 0
+    capsys.readouterr()
+
+    assert run_cli(["list", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 1
+    assert payload[0]["path"] == "a.txt"
+    assert payload[0]["size"] == 5
+    assert payload[0]["hash"] is not None
+
+
+def test_cli_list_with_ref(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_text("hello")
+    assert run_cli(["commit", "-m", "init"]) == 0
+    capsys.readouterr()
+
+    assert run_cli(["list", "--ref", "main"]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "a.txt"
+
+
 def test_cli_checkout_command(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 
@@ -1337,7 +1461,7 @@ def test_cli_checkout_command(tmp_path: Path, capsys, monkeypatch) -> None:
     assert checkout_out == "Switched to branch 'feature'"
 
     # Verify current branch is indeed feature
-    assert run_cli(["status", "--repo", str(tmp_path)]) == 0
+    assert run_cli(["status", "--repo", str(tmp_path), "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["ref"] == "feature"
 
@@ -1345,3 +1469,251 @@ def test_cli_checkout_command(tmp_path: Path, capsys, monkeypatch) -> None:
     assert run_cli(["checkout", "--repo", str(tmp_path), "non-existent"]) == 2
     err_out = capsys.readouterr().err.strip()
     assert "Unknown branch: non-existent" in err_out
+
+
+def test_cli_checkout_restore_all_files(tmp_path: Path, capsys) -> None:
+    (tmp_path / "a.txt").write_text("alpha")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.txt").write_text("beta")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "first"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "a.txt").unlink()
+    (tmp_path / "sub" / "b.txt").unlink()
+    (tmp_path / "sub").rmdir()
+    assert not (tmp_path / "a.txt").exists()
+    assert not (tmp_path / "sub" / "b.txt").exists()
+
+    assert run_cli(["checkout", "--repo", str(tmp_path), "--ref", "main"]) == 0
+    out = capsys.readouterr().out
+    assert "Restored 2 file(s) from 'main'" in out
+    assert (tmp_path / "a.txt").read_text() == "alpha"
+    assert (tmp_path / "sub" / "b.txt").read_text() == "beta"
+
+
+def test_cli_checkout_restore_specific_paths(tmp_path: Path, capsys) -> None:
+    (tmp_path / "x.txt").write_text("x")
+    (tmp_path / "y.txt").write_text("y")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "x.txt").unlink()
+    (tmp_path / "y.txt").unlink()
+
+    assert run_cli(["checkout", "--repo", str(tmp_path), "--ref", "main", "--path", "x.txt"]) == 0
+    out = capsys.readouterr().out
+    assert "Restored 1 file(s) from 'main'" in out
+    assert (tmp_path / "x.txt").read_text() == "x"
+    assert not (tmp_path / "y.txt").exists()
+
+
+def test_cli_checkout_restore_force_overwrite(tmp_path: Path, capsys) -> None:
+    (tmp_path / "f.txt").write_text("original")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "f.txt").write_text("modified")
+
+    assert run_cli(["checkout", "--repo", str(tmp_path), "--ref", "main", "--force"]) == 0
+    out = capsys.readouterr().out
+    assert "Restored 1 file(s) from 'main'" in out
+    assert (tmp_path / "f.txt").read_text() == "original"
+
+
+def test_cli_checkout_restore_safe_skips_existing(tmp_path: Path, capsys) -> None:
+    (tmp_path / "f.txt").write_text("original")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "f.txt").write_text("modified")
+
+    assert run_cli(["checkout", "--repo", str(tmp_path), "--ref", "main"]) == 0
+    out = capsys.readouterr().out
+    assert "Nothing to restore" in out
+    assert (tmp_path / "f.txt").read_text() == "modified"
+
+
+def test_cli_checkout_restore_requires_ref_or_branch(tmp_path: Path, capsys) -> None:
+    assert run_cli(["checkout", "--repo", str(tmp_path)]) == 2
+    err_out = capsys.readouterr().err.strip()
+    assert "Either specify --ref" in err_out
+
+
+def test_cli_checkout_restore_unknown_ref(tmp_path: Path, capsys) -> None:
+    assert run_cli(["checkout", "--repo", str(tmp_path), "--ref", "nonexistent"]) == 2
+    err_out = capsys.readouterr().err.strip()
+    assert "Unknown" in err_out
+
+
+def test_cli_transfer_generates_upload_commands(tmp_path: Path, capsys) -> None:
+    (tmp_path / "a.txt").write_text("hello")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+    assert run_cli(["config", "init", "--repo", str(tmp_path), "--backend", "s3", "--s3-bucket", "test-bucket"]) == 0
+    capsys.readouterr()
+
+    assert run_cli(["transfer", "--repo", str(tmp_path)]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("cp ")
+    assert ".fluxel/blobs/" in out
+    assert "s3://test-bucket/blobs/" in out
+
+
+def test_cli_transfer_generates_download_commands(tmp_path: Path, capsys) -> None:
+    (tmp_path / "a.txt").write_text("hello")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+    assert run_cli(["config", "init", "--repo", str(tmp_path), "--backend", "s3", "--s3-bucket", "test-bucket"]) == 0
+    capsys.readouterr()
+
+    assert run_cli(["transfer", "--repo", str(tmp_path), "--mode", "download"]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("cp ")
+    assert "s3://test-bucket/blobs/" in out
+    assert ".fluxel/blobs/" in out
+    assert out.index("s3://") < out.index(".fluxel/"), "download: S3 should be source (first)"
+
+
+def test_cli_transfer_with_include_metadata(tmp_path: Path, capsys) -> None:
+    (tmp_path / "a.txt").write_text("hello")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+    assert run_cli(["config", "init", "--repo", str(tmp_path), "--backend", "s3", "--s3-bucket", "test-bucket"]) == 0
+    capsys.readouterr()
+
+    assert run_cli(["transfer", "--repo", str(tmp_path), "--include-metadata"]) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) >= 4  # blob + manifest.jsonl + manifest.idx + commit.json
+    assert any("manifests/" in line for line in out)
+    assert any("commits/" in line for line in out)
+
+
+def test_cli_transfer_with_output_file(tmp_path: Path, capsys) -> None:
+    (tmp_path / "a.txt").write_text("hello")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+    assert run_cli(["config", "init", "--repo", str(tmp_path), "--backend", "s3", "--s3-bucket", "test-bucket"]) == 0
+    capsys.readouterr()
+
+    output = tmp_path / "cmds.txt"
+    assert run_cli(["transfer", "--repo", str(tmp_path), "-o", str(output)]) == 0
+    out = capsys.readouterr().out
+    assert f"Wrote 1 s5cmd command(s) to {output}" in out
+    assert output.read_text().strip().startswith("cp ")
+
+
+def test_cli_transfer_with_s3_prefix(tmp_path: Path, capsys) -> None:
+    (tmp_path / "a.txt").write_text("hello")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+    assert run_cli(["config", "init", "--repo", str(tmp_path), "--backend", "s3", "--s3-bucket", "test-bucket", "--s3-prefix", "my/prefix"]) == 0
+    capsys.readouterr()
+
+    assert run_cli(["transfer", "--repo", str(tmp_path)]) == 0
+    out = capsys.readouterr().out.strip()
+    assert "my/prefix/blobs/" in out
+
+
+def test_cli_transfer_fails_without_s3_config(tmp_path: Path, capsys) -> None:
+    assert run_cli(["transfer", "--repo", str(tmp_path)]) == 2
+    err_out = capsys.readouterr().err.strip()
+    assert "S3 backend not configured" in err_out
+
+
+def test_cli_transfer_dedup_blobs(tmp_path: Path, capsys) -> None:
+    (tmp_path / "a.txt").write_text("same content")
+    (tmp_path / "b.txt").write_text("same content")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+    capsys.readouterr()
+    assert run_cli(["config", "init", "--repo", str(tmp_path), "--backend", "s3", "--s3-bucket", "test-bucket"]) == 0
+    capsys.readouterr()
+
+    assert run_cli(["transfer", "--repo", str(tmp_path)]) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1  # same content = same blob hash, deduplicated
+
+
+def test_blob_stream_read_via_filesystem(tmp_path: Path) -> None:
+    from fluxel.core.filesystem import _BlobReadFile
+
+    (tmp_path / "data.bin").write_bytes(b"streaming test content")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+
+    fs = FluxelFileSystem(dataset_roots={"ds": tmp_path})
+    handle = fs._open(f"fluxel://ds@main/data.bin", "rb")
+    assert isinstance(handle, _BlobReadFile)
+    assert handle.readable()
+    assert handle.read() == b"streaming test content"
+    handle.close()
+
+
+def test_blob_stream_chunked_read(tmp_path: Path) -> None:
+    content = b"chunked-read-test-data"
+    (tmp_path / "chunked.bin").write_bytes(content)
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+
+    fs = FluxelFileSystem(dataset_roots={"ds": tmp_path})
+    with fs.open("fluxel://ds@main/chunked.bin", "rb") as handle:
+        first = handle.read(7)
+        assert first == b"chunked"
+        rest = handle.read()
+        assert rest == b"-read-test-data"
+
+
+def test_blob_stream_seek_and_read(tmp_path: Path) -> None:
+    content = b"0123456789abcdef"
+    (tmp_path / "seekable.bin").write_bytes(content)
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+
+    fs = FluxelFileSystem(dataset_roots={"ds": tmp_path})
+    with fs.open("fluxel://ds@main/seekable.bin", "rb") as handle:
+        assert handle.seekable()
+        handle.seek(5)
+        assert handle.read(3) == b"567"
+        assert handle.tell() == 8
+        handle.seek(0)
+        assert handle.read(4) == b"0123"
+
+
+def test_blob_stream_large_file_via_filesystem(tmp_path: Path) -> None:
+    blob_size = 10 * 1024 * 1024  # 10 MB
+    data = b"X" * blob_size
+    (tmp_path / "large.bin").write_bytes(data)
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "large"]) == 0
+
+    fs = FluxelFileSystem(dataset_roots={"ds": tmp_path})
+    position = [0]
+
+    class TrackingReadFile:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def read(self, size: int = -1) -> bytes:
+            chunk = self._inner.read(size)
+            position[0] += len(chunk)
+            return chunk
+
+    repo = fs._repository(tmp_path)
+    commit_id = repo.resolve_ref("main")
+    commit = repo.read_commit(commit_id)
+    entry = repo.resolve_entry("main", "large.bin")
+    assert entry is not None and entry.blob_hash is not None
+
+    raw = repo.open_blob_stream(entry.blob_hash)
+    assert raw is not None
+    chunk = raw.read(8192)
+    assert len(chunk) == 8192
+    raw.close()
+
+
+def test_blob_stream_returns_type_from_open_blob_stream(tmp_path: Path) -> None:
+    from fluxel.core.filesystem import _BlobReadFile
+
+    (tmp_path / "f.txt").write_text("hello")
+    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
+
+    fs = FluxelFileSystem(dataset_roots={"ds": tmp_path})
+    handle = fs._open("fluxel://ds@main/f.txt", "rb")
+    assert type(handle).__name__ == "_BlobReadFile"
+    assert not isinstance(handle, io.BytesIO)
+    handle.close()

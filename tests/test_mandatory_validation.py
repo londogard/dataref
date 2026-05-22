@@ -885,3 +885,61 @@ def test_file_entry_carries_correct_stat_info(tmp_path: Path) -> None:
     assert entry.size == len(content)
     assert entry.mtime_ns > 0
     assert entry.path.name == "test.bin"
+
+
+def test_fake_s3_scale_100k_files_meta_mode(tmp_path: Path, fake_s3_installer) -> None:
+    """Benchmark: commit 100K files via fake S3 backend (meta mode).
+
+    Validates that S3-backed manifest index performs comparably to
+    local storage for lookups and prefix listings.
+    """
+    fake_s3_installer({})
+
+    worktree = tmp_path / "worktree"
+    client_root = tmp_path / "client-state"
+    worktree.mkdir(parents=True)
+    client_root.mkdir(parents=True)
+
+    for i in range(100_000):
+        subdir = worktree / f"dir_{i % 100:03d}"
+        subdir.mkdir(parents=True, exist_ok=True)
+        (subdir / f"file_{i:05d}.txt").touch()
+
+    print(f"\n[FAKE S3 SCALE] Committing 100K files to fake S3...")
+    repo = open_repository(
+        "s3://demo-bucket/fluxel",
+        worktree=worktree,
+        client_root=client_root,
+    )
+    t0 = time.perf_counter()
+    commit_id = repo.commit("100k fake S3", identity_mode="meta")
+    commit_time = time.perf_counter() - t0
+    print(f"  Commit: {commit_time:.2f}s ({100_000 / commit_time:.0f} files/sec)")
+    assert len(commit_id) == 64
+
+    t0 = time.perf_counter()
+    entry = repo.resolve_entry("main", "dir_000/file_00000.txt")
+    lookup_time = time.perf_counter() - t0
+    print(f"  Single lookup: {lookup_time * 1000:.3f}ms")
+    assert entry is not None
+    assert entry.path == "dir_000/file_00000.txt"
+
+    t0 = time.perf_counter()
+    images = repo.resolve_entries_for_prefix("main", "dir_000")
+    listing_time = time.perf_counter() - t0
+    print(f"  Prefix listing (1000): {listing_time * 1000:.3f}ms")
+    assert len(images) == 1000
+
+    t0 = time.perf_counter()
+    images_again = repo.resolve_entries_for_prefix("main", "dir_000")
+    cached_time = time.perf_counter() - t0
+    print(f"  Cached prefix listing: {cached_time * 1000:.3f}ms")
+
+    print(f"\n[FAKE S3 SCALE] Summary:")
+    print(f"  Commit:            {commit_time:.2f}s ({100_000 / commit_time:.0f} files/sec)")
+    print(f"  Single lookup:     {lookup_time * 1000:.3f}ms")
+    print(f"  Prefix list (1k):  {listing_time * 1000:.3f}ms")
+    print(f"  Cached prefix:     {cached_time * 1000:.3f}ms")
+
+    assert lookup_time < 0.1, f"Single lookup took {lookup_time * 1000:.3f}ms (expected < 100ms)"
+    assert listing_time < 0.2, f"Prefix listing took {listing_time * 1000:.3f}ms (expected < 200ms)"

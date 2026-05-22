@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .config import FluxelConfig, save_config
+
 
 @dataclass(frozen=True)
 class FluxelLayout:
@@ -56,7 +58,12 @@ class FluxelLayout:
 
 
 def initialize_fluxel_layout(root: str | Path) -> FluxelLayout:
-    return FluxelLayout.initialize(root)
+    layout = FluxelLayout.initialize(root)
+    config_path = layout.fluxel_dir / "config.json"
+    if not config_path.exists():
+        default_config = FluxelConfig(dataset_root=str(layout.root))
+        save_config(layout.root, default_config)
+    return layout
 
 
 def blob_relpath(content_hash: str) -> Path:

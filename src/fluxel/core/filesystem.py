@@ -17,6 +17,7 @@ from fsspec.spec import AbstractFileSystem
 
 from .manifest import ManifestEntry
 from .repository import FluxelRepository
+from .repository_support import normalize_repository_path
 from .storage import open_source_uri
 
 
@@ -61,7 +62,7 @@ class FluxelFileSystem(AbstractFileSystem):
         resolved = self._resolve_entry(path)
         if resolved.entry.blob_hash:
             repo = self._repository(resolved.root)
-            return io.BytesIO(repo.read_blob(resolved.entry.blob_hash))
+            return _BlobReadFile(repo.open_blob_stream(resolved.entry.blob_hash))
         if resolved.entry.source_uri:
             return _SourceURIFile(open_source_uri(resolved.entry.source_uri))
         raise FileNotFoundError(
@@ -146,6 +147,9 @@ class FluxelFileSystem(AbstractFileSystem):
     def _dataset_root(self, dataset: str) -> Path:
         if dataset in self.dataset_roots:
             return self.dataset_roots[dataset]
+        _validate_uri_component(dataset, "dataset")
+        if "/" in dataset or dataset in (".", ".."):
+            raise ValueError("Fluxel URI dataset cannot contain path separators")
         candidate = Path.cwd() / dataset
         if candidate.exists():
             return candidate.resolve()
@@ -153,13 +157,20 @@ class FluxelFileSystem(AbstractFileSystem):
 
     def _parse_uri(self, path: str, *, allow_empty_path: bool = False) -> FluxelURI:
         stripped = self._strip_protocol(path)
+        if not stripped:
+            raise ValueError("Fluxel URI cannot be empty")
         if "@" not in stripped:
             raise ValueError(
                 "Fluxel URI must include a ref: fluxel://<dataset>@<ref>/<path>"
             )
         dataset, remainder = stripped.split("@", maxsplit=1)
+        _validate_uri_component(dataset, "dataset")
         if not dataset:
             raise ValueError("Fluxel URI dataset cannot be empty")
+        if "/" in dataset:
+            raise ValueError("Fluxel URI dataset cannot contain path separators")
+        if dataset in (".", ".."):
+            raise ValueError("Fluxel URI dataset cannot be '.' or '..'")
         if "/" in remainder:
             ref_raw, logical_path = remainder.split("/", maxsplit=1)
         else:
@@ -169,10 +180,17 @@ class FluxelFileSystem(AbstractFileSystem):
         if ref_raw.endswith("+staged"):
             include_staging = True
             ref = ref_raw[: -len("+staged")]
+        _validate_uri_component(ref, "ref")
         if not ref:
             raise ValueError("Fluxel URI ref cannot be empty")
+        if "/" in ref:
+            raise ValueError("Fluxel URI ref cannot contain path separators")
+        if ref in (".", ".."):
+            raise ValueError("Fluxel URI ref cannot be '.' or '..'")
         logical_path = logical_path.strip("/")
-        if not logical_path and not allow_empty_path:
+        if logical_path:
+            logical_path = normalize_repository_path(logical_path)
+        elif not allow_empty_path:
             raise ValueError("Fluxel URI must include a logical file path")
         return FluxelURI(
             dataset=dataset,
@@ -180,6 +198,14 @@ class FluxelFileSystem(AbstractFileSystem):
             logical_path=logical_path,
             include_staging=include_staging,
         )
+
+
+def _validate_uri_component(component: str, name: str) -> None:
+    if "\x00" in component:
+        raise ValueError(f"Fluxel URI {name} contains null bytes")
+    for ch in component:
+        if 0 < ord(ch) < 32:
+            raise ValueError(f"Fluxel URI {name} contains control characters")
 
 
 @dataclass(frozen=True)
@@ -219,6 +245,36 @@ class _SourceURIFile(io.IOBase):
                 close()
         finally:
             self._context_manager.__exit__(None, None, None)
+            super().close()
+
+
+class _BlobReadFile(io.IOBase):
+    def __init__(self, handle: BinaryIO) -> None:
+        self._handle = handle
+
+    def read(self, size: int = -1) -> bytes:
+        return self._handle.read(size)
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return bool(getattr(self._handle, "seekable", lambda: False)())
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        return self._handle.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._handle.tell()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            close = getattr(self._handle, "close", None)
+            if callable(close):
+                close()
+        finally:
             super().close()
 
 

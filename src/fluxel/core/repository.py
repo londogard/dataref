@@ -13,14 +13,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
 from tempfile import NamedTemporaryFile
-from typing import Iterator, Literal
+from typing import BinaryIO, Iterator, Literal
 
 from blake3 import blake3
 
 from .client_state import LocalClientState
+from .config import load_config, validate_config
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file
-from .layout import initialize_fluxel_layout
-from .manifest import ManifestEntry, ManifestWriter, walk_files
+from .layout import blob_relpath, initialize_fluxel_layout
+from .manifest import ManifestEntry, ManifestWriter, walk_files, FileEntry
 from .repository_store import (
     BranchRefState,
     LocalRepositoryStore,
@@ -137,6 +138,18 @@ class StageStatus:
     ref: str
     added: list[str]
     removed: list[str]
+    modified: list[str] = ()
+    working_tree_added: list[str] = ()
+    working_tree_removed: list[str] = ()
+    working_tree_modified: list[str] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "added", list(self.added))
+        object.__setattr__(self, "removed", list(self.removed))
+        object.__setattr__(self, "modified", list(self.modified))
+        object.__setattr__(self, "working_tree_added", list(self.working_tree_added))
+        object.__setattr__(self, "working_tree_removed", list(self.working_tree_removed))
+        object.__setattr__(self, "working_tree_modified", list(self.working_tree_modified))
 
 
 class RefConflictError(RuntimeError):
@@ -169,6 +182,9 @@ class FluxelRepository:
         blob_transfer: BlobTransferBackend | None = None,
     ) -> None:
         self.layout = initialize_fluxel_layout(root)
+        config = load_config(root)
+        if config is not None:
+            validate_config(config)
         self.store = store or LocalRepositoryStore(self.layout.root)
         if isinstance(self.store, S3RepositoryStore) and blob_transfer is not None:
             self.store = S3RepositoryStore(
@@ -542,7 +558,7 @@ class FluxelRepository:
             moved_paths=sorted(moved_paths),
         )
 
-    def status(self, *, ref: str | None = None) -> StageStatus:
+    def status(self, *, ref: str | None = None, working_tree: bool = False) -> StageStatus:
         branch = ref or self.current_branch()
         self._ensure_branch_exists(branch)
         staged = self._load_stage(branch)
@@ -552,7 +568,60 @@ class FluxelRepository:
         removed = sorted(
             change.path for change in staged.values() if change.action == "remove"
         )
-        return StageStatus(ref=branch, added=added, removed=removed)
+
+        wt_added: list[str] = []
+        wt_removed: list[str] = []
+        wt_modified: list[str] = []
+        if working_tree:
+            wt_added, wt_removed, wt_modified = self._compare_working_tree(branch)
+
+        return StageStatus(
+            ref=branch,
+            added=added,
+            removed=removed,
+            modified=[],
+            working_tree_added=wt_added,
+            working_tree_removed=wt_removed,
+            working_tree_modified=wt_modified,
+        )
+
+    def _compare_working_tree(self, branch: str) -> tuple[list[str], list[str], list[str]]:
+        head_commit = self.head_commit()
+        if head_commit is None:
+            manifest_paths: set[str] = set()
+            manifest_by_path: dict[str, ManifestEntry] = {}
+        else:
+            commit_obj = self.read_commit(head_commit)
+            manifest_by_path = {
+                entry.path: entry
+                for entry in self.store.iter_manifest_entries(commit_obj.manifest)
+            }
+            manifest_paths = set(manifest_by_path)
+
+        working_files: dict[str, FileEntry] = {}
+        for file_entry in walk_files(self.root):
+            relative = file_entry.path.relative_to(self.root).as_posix()
+            working_files[relative] = file_entry
+        working_paths = set(working_files)
+
+        added_paths: list[str] = []
+        removed_paths: list[str] = []
+        modified_paths: list[str] = []
+
+        for path in sorted(working_paths - manifest_paths):
+            added_paths.append(path)
+
+        for path in sorted(manifest_paths - working_paths):
+            removed_paths.append(path)
+
+        for path in sorted(working_paths & manifest_paths):
+            manifest_entry = manifest_by_path[path]
+            working_file = working_files[path]
+            current_hash = blake3_digest_file(working_file.path)
+            if current_hash != manifest_entry.hash or working_file.size != manifest_entry.size:
+                modified_paths.append(path)
+
+        return added_paths, removed_paths, modified_paths
 
     def read_commit(self, commit_id: str) -> CommitObject:
         cached_commit = self._commit_cache.get(commit_id)
@@ -1356,6 +1425,106 @@ class FluxelRepository:
     def read_blob(self, blob_hash: str) -> bytes:
         return self.store.read_blob_bytes(blob_hash)
 
+    def open_blob_stream(self, blob_hash: str) -> BinaryIO:
+        return self.store.open_blob(blob_hash)
+
+    def restore_files(
+        self,
+        ref: str,
+        paths: list[str] | None = None,
+        *,
+        force: bool = False,
+    ) -> list[str]:
+        commit_id = self.resolve_ref(ref)
+        commit = self.read_commit(commit_id)
+
+        if paths:
+            entries: dict[str, ManifestEntry] = {}
+            for p in paths:
+                entry = self.store.lookup_manifest_entry(commit.manifest, p)
+                if entry is not None:
+                    entries[p] = entry
+        else:
+            entries = {
+                entry.path: entry
+                for entry in self.store.iter_manifest_entries(commit.manifest)
+            }
+
+        restored: list[str] = []
+        for logical_path, entry in sorted(entries.items()):
+            target = self.root / logical_path
+            if target.exists() and not force:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if entry.blob_hash:
+                target.write_bytes(self.read_blob(entry.blob_hash))
+                restored.append(logical_path)
+            elif entry.source_uri:
+                source_file = next(open_source_uri(entry.source_uri))
+                with source_file:
+                    target.write_bytes(source_file.read())
+                restored.append(logical_path)
+        return restored
+
+    def generate_transfer_commands(
+        self,
+        ref: str | None = None,
+        *,
+        mode: str = "upload",
+        include_metadata: bool = False,
+    ) -> list[str]:
+        config = load_config(self.root)
+        if config is None or config.backend != "s3" or config.s3 is None:
+            raise ValueError("S3 backend not configured in repo config")
+        bucket = config.s3.bucket
+
+        branch = ref or self.current_branch()
+        commit_id = self.resolve_ref(branch)
+        commit = self.read_commit(commit_id)
+        s3_prefix = config.s3.prefix or ""
+
+        local_store = LocalRepositoryStore(self.root)
+        commands: list[str] = []
+        seen: set[str] = set()
+
+        for entry in local_store.iter_manifest_entries(commit.manifest):
+            if entry.blob_hash and entry.blob_hash not in seen:
+                seen.add(entry.blob_hash)
+                rel = blob_relpath(entry.blob_hash).as_posix()
+                s3_key = f"blobs/{rel}"
+                if s3_prefix:
+                    s3_key = f"{s3_prefix}/{s3_key}"
+                s3_uri = f"s3://{bucket}/{s3_key}"
+                local = str(self.layout.blobs_dir / rel)
+                if mode == "upload":
+                    commands.append(f"cp {local} {s3_uri}")
+                else:
+                    commands.append(f"cp {s3_uri} {local}")
+
+        if include_metadata:
+            for manifest_hash, extension in [(commit.manifest, "jsonl"), (commit.manifest, "idx")]:
+                s3_key = f"manifests/{manifest_hash}.{extension}"
+                if s3_prefix:
+                    s3_key = f"{s3_prefix}/{s3_key}"
+                s3_uri = f"s3://{bucket}/{s3_key}"
+                local = str(self.layout.manifests_dir / f"{manifest_hash}.{extension}")
+                if mode == "upload":
+                    commands.append(f"cp {local} {s3_uri}")
+                else:
+                    commands.append(f"cp {s3_uri} {local}")
+
+            commit_s3_key = f"commits/{commit_id}.json"
+            if s3_prefix:
+                commit_s3_key = f"{s3_prefix}/{commit_s3_key}"
+            commit_s3_uri = f"s3://{bucket}/{commit_s3_key}"
+            commit_local = str(self.layout.commits_dir / f"{commit_id}.json")
+            if mode == "upload":
+                commands.append(f"cp {commit_local} {commit_s3_uri}")
+            else:
+                commands.append(f"cp {commit_s3_uri} {commit_local}")
+
+        return commands
+
     def _persist_manifest(self, temp_manifest: Path, manifest_hash: str) -> None:
         temp_index = self._write_temp_manifest_index(temp_manifest)
         try:
@@ -1541,6 +1710,30 @@ def open_repository(
         )
 
     repo_root = Path(root).resolve()
+    config = load_config(repo_root)
+
+    if config is not None and config.backend == "s3" and config.s3 is not None:
+        bucket = config.s3.bucket
+        prefix = config.s3.prefix
+        worktree_root = Path(worktree or repo_root)
+        if worktree or client_root:
+            resolved_client_root = (
+                Path(client_root).resolve() if client_root else worktree_root
+            )
+        else:
+            resolved_client_root = worktree_root
+        return FluxelRepository(
+            worktree_root,
+            store=S3RepositoryStore(
+                bucket,
+                prefix,
+                client=s3_client,
+                branch_root=worktree_root / ".fluxel" / "refs" / "heads",
+                blob_transfer=blob_transfer,
+            ),
+            client_state=LocalClientState(resolved_client_root),
+        )
+
     worktree_root = Path(worktree).resolve() if worktree else repo_root
     resolved_client_root = Path(client_root).resolve() if client_root else repo_root
     return FluxelRepository(
@@ -1698,8 +1891,8 @@ def move_staged(
     return repo.status(ref=branch)
 
 
-def status(root: str | Path, *, ref: str | None = None) -> StageStatus:
-    return open_repository(root).status(ref=ref)
+def status(root: str | Path, *, ref: str | None = None, working_tree: bool = True) -> StageStatus:
+    return open_repository(root).status(ref=ref, working_tree=working_tree)
 
 
 def diff(root: str | Path, from_ref: str, to_ref: str) -> list[DiffEntry]:
@@ -1725,3 +1918,35 @@ def log(root: str | Path, ref: str) -> Iterator[CommitObject]:
 
 def checkout(root: str | Path, branch: str) -> None:
     open_repository(root).set_current_branch(branch)
+
+
+def restore_files(
+    root: str | Path,
+    ref: str,
+    paths: list[str] | None = None,
+    *,
+    force: bool = False,
+    blob_transfer: BlobTransferBackend | str | None = None,
+) -> list[str]:
+    return open_repository(root, blob_transfer=blob_transfer).restore_files(
+        ref, paths=paths, force=force
+    )
+
+
+def generate_transfer_commands(
+    root: str | Path,
+    ref: str | None = None,
+    *,
+    mode: str = "upload",
+    include_metadata: bool = False,
+) -> list[str]:
+    repo_root = Path(root).resolve()
+    store = LocalRepositoryStore(repo_root)
+    repo = FluxelRepository(
+        repo_root,
+        store=store,
+        client_state=LocalClientState(repo_root),
+    )
+    return repo.generate_transfer_commands(
+        ref, mode=mode, include_metadata=include_metadata
+    )

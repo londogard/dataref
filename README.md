@@ -46,13 +46,10 @@ Fluxel is intentionally in MVP mode.
 - `fsspec` provider for `fluxel://` URI reads.
 - Local + S3 storage backend abstractions available in code.
 
-### Not Fully Wired Yet
+### Not Wired Yet
 
 - No remote sync CLI (`push/pull/fetch`) yet.
-- No `log/status/list/checkout` CLI surface yet.
-- No `s5cmd` command-list generation path for bulk transfer yet.
-- S3 branch locking now recovers expired stale lock objects automatically, but there is still no operator-facing lock inspection or cleanup command.
-- S3 branch locking now recovers expired stale lock objects automatically, but there is still no operator-facing lock inspection or cleanup command.
+- No operator-facing S3 lock inspection or cleanup command.
 
 ## Technical Stack
 

@@ -85,6 +85,8 @@ class RepositoryStore(Protocol):
 
     def read_blob_bytes(self, blob_hash: str) -> bytes: ...
 
+    def open_blob(self, blob_hash: str) -> BinaryIO: ...
+
     def lookup_manifest_entry(
         self, manifest_hash: str, logical_path: str
     ) -> ManifestEntry | None: ...
@@ -199,6 +201,9 @@ class LocalRepositoryStore(RepositoryStore):
 
     def read_blob_bytes(self, blob_hash: str) -> bytes:
         return self.blob_path(blob_hash).read_bytes()
+
+    def open_blob(self, blob_hash: str) -> BinaryIO:
+        return self.blob_path(blob_hash).open("rb")
 
     def lookup_manifest_entry(
         self, manifest_hash: str, logical_path: str
@@ -473,6 +478,19 @@ class S3RepositoryStore(RepositoryStore):
             Key=self._key("blob", blob_hash),
         )
         return response["Body"].read()
+
+    def open_blob(self, blob_hash: str) -> BinaryIO:
+        if self._blob_transfer is not None:
+            response = self.client.get_object(
+                Bucket=self.bucket,
+                Key=self._key("blob", blob_hash),
+            )
+            return response["Body"]
+        response = self.client.get_object(
+            Bucket=self.bucket,
+            Key=self._key("blob", blob_hash),
+        )
+        return response["Body"]
 
     def lookup_manifest_entry(
         self, manifest_hash: str, logical_path: str
