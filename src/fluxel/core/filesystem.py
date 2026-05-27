@@ -1,10 +1,3 @@
-# Fluxel Guardrails (Permanent):
-# - DO NOT optimize for ML throughput in canonical storage (`blobs/`): no sharding, tarballs, or parquet in the blob layer.
-# - DO NOT read blob data for metadata-only operations (diff, list, log, status).
-# - DO NOT introduce a server, daemon, or central database; Fluxel is 100% client-side/serverless.
-# - DO NOT use SHA-1/SHA-256; use Blake3 for all content hashing.
-# - PREFER JSONL manifests to preserve streaming and O(1) memory usage.
-
 from __future__ import annotations
 
 import io
@@ -17,7 +10,7 @@ from fsspec.spec import AbstractFileSystem
 
 from .manifest import ManifestEntry
 from .repository import FluxelRepository
-from .repository_support import normalize_repository_path
+from .repository_support import _validate_no_binary, normalize_repository_path
 from .storage import open_source_uri
 
 
@@ -201,11 +194,7 @@ class FluxelFileSystem(AbstractFileSystem):
 
 
 def _validate_uri_component(component: str, name: str) -> None:
-    if "\x00" in component:
-        raise ValueError(f"Fluxel URI {name} contains null bytes")
-    for ch in component:
-        if 0 < ord(ch) < 32:
-            raise ValueError(f"Fluxel URI {name} contains control characters")
+    _validate_no_binary(component, context=f"Fluxel URI {name}")
 
 
 @dataclass(frozen=True)

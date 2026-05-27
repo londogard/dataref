@@ -14,11 +14,12 @@ from botocore.exceptions import ClientError
 from .layout import blob_relpath, initialize_fluxel_layout
 from .manifest import ManifestEntry, ManifestReader, deserialize_manifest_entry
 from .manifest_index import (
+    ManifestIndex,
     build_manifest_index,
     iter_manifest_index_entry_jsons,
     lookup_manifest_index_entry_json,
 )
-from .storage import BlobTransferBackend, OptimisticLockError
+from .storage import BlobTransferBackend, OptimisticLockError, _s3_is_404, _s3_is_precondition_failed
 
 
 RepositoryObjectKind = Literal["blob", "commit", "manifest", "manifest-index", "ref"]
@@ -88,11 +89,19 @@ class RepositoryStore(Protocol):
     def open_blob(self, blob_hash: str) -> BinaryIO: ...
 
     def lookup_manifest_entry(
-        self, manifest_hash: str, logical_path: str
+        self,
+        manifest_hash: str,
+        logical_path: str,
+        *,
+        manifest_index: ManifestIndex | None = None,
     ) -> ManifestEntry | None: ...
 
     def iter_manifest_entries_for_prefix(
-        self, manifest_hash: str, logical_prefix: str
+        self,
+        manifest_hash: str,
+        logical_prefix: str,
+        *,
+        manifest_index: ManifestIndex | None = None,
     ) -> Iterator[ManifestEntry]: ...
 
     def write_blob_file(
@@ -206,38 +215,65 @@ class LocalRepositoryStore(RepositoryStore):
         return self.blob_path(blob_hash).open("rb")
 
     def lookup_manifest_entry(
-        self, manifest_hash: str, logical_path: str
+        self,
+        manifest_hash: str,
+        logical_path: str,
+        *,
+        manifest_index: ManifestIndex | None = None,
     ) -> ManifestEntry | None:
-        index_path = self.manifest_index_path(manifest_hash)
         manifest_path = self.manifest_path(manifest_hash)
-        entry_json = lookup_manifest_index_entry_json(
-            index_path,
-            logical_path,
-            read_range=lambda start, end: self._read_manifest_range(
-                manifest_path,
-                start,
-                end,
-            ),
-        )
+        if manifest_index is not None:
+            entry_json = lookup_manifest_index_entry_json(
+                logical_path,
+                read_range=lambda start, end: self._read_manifest_range(
+                    manifest_path, start, end
+                ),
+                index=manifest_index,
+            )
+        else:
+            index_path = self.manifest_index_path(manifest_hash)
+            if not index_path.exists():
+                return None
+            entry_json = lookup_manifest_index_entry_json(
+                logical_path,
+                read_range=lambda start, end: self._read_manifest_range(
+                    manifest_path, start, end
+                ),
+                index_path=index_path,
+            )
         if entry_json is None:
             return None
         return deserialize_manifest_entry(entry_json)
 
     def iter_manifest_entries_for_prefix(
-        self, manifest_hash: str, logical_prefix: str
+        self,
+        manifest_hash: str,
+        logical_prefix: str,
+        *,
+        manifest_index: ManifestIndex | None = None,
     ) -> Iterator[ManifestEntry]:
         normalized_prefix = logical_prefix.strip("/")
-        index_path = self.manifest_index_path(manifest_hash)
         manifest_path = self.manifest_path(manifest_hash)
-        for entry_json in iter_manifest_index_entry_jsons(
-            index_path,
-            normalized_prefix or None,
-            read_range=lambda start, end: self._read_manifest_range(
-                manifest_path,
-                start,
-                end,
-            ),
-        ):
+        if manifest_index is not None:
+            iter_jsons = iter_manifest_index_entry_jsons(
+                logical_prefix=normalized_prefix or None,
+                read_range=lambda start, end: self._read_manifest_range(
+                    manifest_path, start, end
+                ),
+                index=manifest_index,
+            )
+        else:
+            index_path = self.manifest_index_path(manifest_hash)
+            if not index_path.exists():
+                return
+            iter_jsons = iter_manifest_index_entry_jsons(
+                logical_prefix=normalized_prefix or None,
+                read_range=lambda start, end: self._read_manifest_range(
+                    manifest_path, start, end
+                ),
+                index_path=index_path,
+            )
+        for entry_json in iter_jsons:
             yield deserialize_manifest_entry(entry_json)
 
     def write_blob_file(
@@ -480,12 +516,6 @@ class S3RepositoryStore(RepositoryStore):
         return response["Body"].read()
 
     def open_blob(self, blob_hash: str) -> BinaryIO:
-        if self._blob_transfer is not None:
-            response = self.client.get_object(
-                Bucket=self.bucket,
-                Key=self._key("blob", blob_hash),
-            )
-            return response["Body"]
         response = self.client.get_object(
             Bucket=self.bucket,
             Key=self._key("blob", blob_hash),
@@ -493,41 +523,63 @@ class S3RepositoryStore(RepositoryStore):
         return response["Body"]
 
     def lookup_manifest_entry(
-        self, manifest_hash: str, logical_path: str
+        self,
+        manifest_hash: str,
+        logical_path: str,
+        *,
+        manifest_index: ManifestIndex | None = None,
     ) -> ManifestEntry | None:
-        index_path = self._cached_manifest_index_path(manifest_hash)
-        if index_path is None:
-            raise FileNotFoundError(f"Missing manifest index for: {manifest_hash}")
-        entry_json = lookup_manifest_index_entry_json(
-            index_path,
-            logical_path,
-            read_range=lambda start, end: self._read_remote_manifest_range(
-                manifest_hash,
-                start,
-                end,
-            ),
-        )
+        if manifest_index is not None:
+            entry_json = lookup_manifest_index_entry_json(
+                logical_path,
+                read_range=lambda start, end: self._read_remote_manifest_range(
+                    manifest_hash, start, end
+                ),
+                index=manifest_index,
+            )
+        else:
+            index_path = self._cached_manifest_index_path(manifest_hash)
+            if index_path is None:
+                raise FileNotFoundError(f"Missing manifest index for: {manifest_hash}")
+            entry_json = lookup_manifest_index_entry_json(
+                logical_path,
+                read_range=lambda start, end: self._read_remote_manifest_range(
+                    manifest_hash, start, end
+                ),
+                index_path=index_path,
+            )
         if entry_json is None:
             return None
         return deserialize_manifest_entry(entry_json)
 
     def iter_manifest_entries_for_prefix(
-        self, manifest_hash: str, logical_prefix: str
+        self,
+        manifest_hash: str,
+        logical_prefix: str,
+        *,
+        manifest_index: ManifestIndex | None = None,
     ) -> Iterator[ManifestEntry]:
         normalized_prefix = logical_prefix.strip("/")
-        index_path = self._cached_manifest_index_path(manifest_hash)
-        if index_path is None:
-            raise FileNotFoundError(f"Missing manifest index for: {manifest_hash}")
-
-        for entry_json in iter_manifest_index_entry_jsons(
-            index_path,
-            normalized_prefix or None,
-            read_range=lambda start, end: self._read_remote_manifest_range(
-                manifest_hash,
-                start,
-                end,
-            ),
-        ):
+        if manifest_index is not None:
+            iter_jsons = iter_manifest_index_entry_jsons(
+                logical_prefix=normalized_prefix or None,
+                read_range=lambda start, end: self._read_remote_manifest_range(
+                    manifest_hash, start, end
+                ),
+                index=manifest_index,
+            )
+        else:
+            index_path = self._cached_manifest_index_path(manifest_hash)
+            if index_path is None:
+                raise FileNotFoundError(f"Missing manifest index for: {manifest_hash}")
+            iter_jsons = iter_manifest_index_entry_jsons(
+                logical_prefix=normalized_prefix or None,
+                read_range=lambda start, end: self._read_remote_manifest_range(
+                    manifest_hash, start, end
+                ),
+                index_path=index_path,
+            )
+        for entry_json in iter_jsons:
             yield deserialize_manifest_entry(entry_json)
 
     def write_blob_file(
@@ -768,12 +820,10 @@ class S3RepositoryStore(RepositoryStore):
             raise
 
     def _missing(self, error: ClientError) -> bool:
-        code = error.response.get("Error", {}).get("Code", "")
-        return code in {"404", "NoSuchKey", "NotFound"}
+        return _s3_is_404(error)
 
     def _precondition_failed(self, error: ClientError) -> bool:
-        code = error.response.get("Error", {}).get("Code", "")
-        return code in {"PreconditionFailed", "412"}
+        return _s3_is_precondition_failed(error)
 
 
 def build_manifest_index_file(

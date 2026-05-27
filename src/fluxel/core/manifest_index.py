@@ -68,13 +68,48 @@ def build_manifest_index(
     index.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
 
 
+def load_manifest_index_from_data(data: dict) -> ManifestIndex:
+    blocks_list = data.get("blocks", [])
+    blocks: tuple[ManifestIndexBlock, ...]
+    if blocks_list:
+        if isinstance(blocks_list[0], dict):
+            blocks = tuple(
+                ManifestIndexBlock(first_path=str(b["first_path"]), offset=int(b["offset"]))
+                for b in blocks_list
+            )
+        else:
+            blocks = tuple(
+                ManifestIndexBlock(first_path=str(fp), offset=int(off))
+                for fp, off in blocks_list
+            )
+    else:
+        blocks = ()
+    return ManifestIndex(
+        manifest_size=int(data.get("manifest_size", 0)),
+        block_entry_count=int(
+            data.get("block_entry_count", DEFAULT_INDEX_BLOCK_ENTRY_COUNT)
+        ),
+        blocks=blocks,
+    )
+
+
+def load_manifest_index(index_path: str | Path) -> ManifestIndex:
+    return load_manifest_index_from_data(
+        json.loads(Path(index_path).read_text(encoding="utf-8"))
+    )
+
+
 def lookup_manifest_index_entry_json(
-    index_path: str | Path,
     logical_path: str,
     *,
     read_range: Callable[[int, int], bytes],
+    index_path: str | Path | None = None,
+    index: ManifestIndex | None = None,
 ) -> str | None:
-    index = load_manifest_index(index_path)
+    if index is None:
+        if index_path is None:
+            raise ValueError("Must provide either index or index_path")
+        index = load_manifest_index(index_path)
     block_index = _lookup_block_index(index, logical_path)
     if block_index is None:
         return None
@@ -88,12 +123,16 @@ def lookup_manifest_index_entry_json(
 
 
 def iter_manifest_index_entry_jsons(
-    index_path: str | Path,
     logical_prefix: str | None = None,
     *,
     read_range: Callable[[int, int], bytes],
+    index_path: str | Path | None = None,
+    index: ManifestIndex | None = None,
 ) -> Iterator[str]:
-    index = load_manifest_index(index_path)
+    if index is None:
+        if index_path is None:
+            raise ValueError("Must provide either index or index_path")
+        index = load_manifest_index(index_path)
     if not index.blocks:
         return
 
@@ -123,21 +162,6 @@ def iter_manifest_index_entry_jsons(
                 continue
             if path >= prefix_upper_bound and path != normalized_prefix:
                 return
-
-
-def load_manifest_index(index_path: str | Path) -> ManifestIndex:
-    payload = json.loads(Path(index_path).read_text(encoding="utf-8"))
-    blocks = tuple(
-        ManifestIndexBlock(first_path=str(first_path), offset=int(offset))
-        for first_path, offset in payload.get("blocks", [])
-    )
-    return ManifestIndex(
-        manifest_size=int(payload.get("manifest_size", 0)),
-        block_entry_count=int(
-            payload.get("block_entry_count", DEFAULT_INDEX_BLOCK_ENTRY_COUNT)
-        ),
-        blocks=blocks,
-    )
 
 
 def _prefix_upper_bound(prefix: str) -> str:

@@ -14,33 +14,38 @@ def metadata_identity(relative_path: str, size: int) -> str:
 
 
 def normalize_repository_path(path: str) -> str:
-    _validate_no_binary(path)
-    stripped = path.strip()
+    return _sanitize_path_component(path, "Path")
+
+
+def _sanitize_path_component(value: str, context: str) -> str:
+    _validate_no_binary(value)
+    stripped = value.strip()
     if not stripped:
-        raise ValueError("Path cannot be empty")
+        raise ValueError(f"{context} cannot be empty")
     if stripped.startswith("/"):
-        raise ValueError("Path cannot be absolute")
+        raise ValueError(f"{context} cannot be absolute")
     normalized = stripped.strip("/")
     if not normalized:
-        raise ValueError("Path cannot be empty")
+        raise ValueError(f"{context} cannot be empty")
     if (
         normalized in (".", "..")
         or normalized.startswith("../")
         or "/../" in normalized
         or normalized.endswith("/..")
     ):
-        raise ValueError("Path cannot traverse outside repository root")
+        raise ValueError(f"{context} cannot traverse outside repository root")
     if "//" in normalized:
-        raise ValueError("Path contains empty components")
+        raise ValueError(f"{context} contains empty components")
     return normalized
 
 
-def _validate_no_binary(token: str) -> None:
+def _validate_no_binary(token: str, *, context: str = "") -> None:
+    prefix = f"{context}: " if context else ""
     if "\x00" in token:
-        raise ValueError("Path contains null bytes")
+        raise ValueError(f"{prefix}Path contains null bytes")
     for ch in token:
         if 0 < ord(ch) < 32:
-            raise ValueError("Path contains control characters")
+            raise ValueError(f"{prefix}Path contains control characters")
 
 
 def normalize_logical_paths(paths: list[str]) -> list[str]:
@@ -119,27 +124,7 @@ def normalize_s3_import_path(
 def normalize_import_patterns(path_patterns: list[str] | None) -> list[str]:
     patterns: list[str] = []
     for pattern in path_patterns or []:
-        _validate_no_binary(pattern)
-        stripped = pattern.strip()
-        if not stripped:
-            raise ValueError("Import path filter cannot be empty")
-        if stripped.startswith("/"):
-            raise ValueError("Import path filter cannot be absolute")
-        normalized = stripped.strip("/")
-        if not normalized:
-            raise ValueError("Import path filter cannot be empty")
-        if (
-            normalized in (".", "..")
-            or normalized.startswith("../")
-            or "/../" in normalized
-            or normalized.endswith("/..")
-        ):
-            raise ValueError(
-                "Import path filter cannot traverse outside repository root"
-            )
-        if "//" in normalized:
-            raise ValueError("Import path filter contains empty components")
-        patterns.append(normalized)
+        patterns.append(_sanitize_path_component(pattern, "Import path filter"))
     return patterns
 
 

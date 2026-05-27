@@ -1,10 +1,3 @@
-# Fluxel Guardrails (Permanent):
-# - DO NOT optimize for ML throughput in canonical storage (`blobs/`): no sharding, tarballs, or parquet in the blob layer.
-# - DO NOT read blob data for metadata-only operations (diff, list, log, status).
-# - DO NOT introduce a server, daemon, or central database; Fluxel is 100% client-side/serverless.
-# - DO NOT use SHA-1/SHA-256; use Blake3 for all content hashing.
-# - PREFER JSONL manifests to preserve streaming and O(1) memory usage.
-
 from __future__ import annotations
 
 import json
@@ -226,22 +219,70 @@ def _manifest_entry_from_payload(payload: object) -> ManifestEntry:
     raise ValueError("Manifest entry payload has an unsupported shape")
 
 
-class ManifestWriter:
-    def __init__(self, manifest_path: str | Path) -> None:
-        self.manifest_path = Path(manifest_path)
+def _manifest_entry_path_for_index(payload_text: str) -> str:
+    """Extract the path from a compact-serialized manifest entry without full JSON parse.
 
-    def write_entries(self, entries: Iterable[ManifestEntry | str]) -> int:
+    The compact JSON format is always ``["b","path",...]`` or ``["m","path",...]``
+    with ``separators=(",",":")`` — the path is the third quoted field.
+    """
+    return payload_text.split('"', 4)[3]
+
+
+class ManifestWriter:
+    def __init__(self, manifest_path: str | Path, *, block_entry_count: int = 0) -> None:
+        self.manifest_path = Path(manifest_path)
+        self.block_entry_count = block_entry_count
+        self._blocks: list[tuple[str, int]] = []
+        self._entry_count = 0
+        self._manifest_size = 0
+
+    def write_entries(self, entries: Iterable[ManifestEntry | str | tuple[str, str]]) -> int:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         written = 0
-        with self.manifest_path.open("w", encoding="utf-8") as handle:
+        offset = 0
+        previous_path: str | None = None
+        with self.manifest_path.open("wb") as handle:
             for entry in entries:
-                if isinstance(entry, str):
-                    handle.write(entry)
+                if isinstance(entry, tuple):
+                    path, payload = entry
+                    line = payload.encode("utf-8")
+                elif isinstance(entry, str):
+                    line = entry.encode("utf-8")
+                    if self.block_entry_count > 0:
+                        path = _manifest_entry_path_for_index(entry)
                 else:
-                    handle.write(serialize_manifest_entry(entry))
-                handle.write("\n")
+                    line = serialize_manifest_entry(entry).encode("utf-8")
+                    path = entry.path
+
+                if self.block_entry_count > 0:
+                    if previous_path is not None and path <= previous_path:
+                        raise ValueError(
+                            "Manifest entries must be sorted by path to build an index"
+                        )
+                    if written % self.block_entry_count == 0:
+                        self._blocks.append((path, offset))
+                    previous_path = path
+
+                handle.write(line + b"\n")
+                offset += len(line) + 1
                 written += 1
+
+        self._entry_count = written
+        self._manifest_size = offset
         return written
+
+    def build_index(self):
+        if self.block_entry_count <= 0 or not self._blocks:
+            return None
+        from .manifest_index import ManifestIndex, ManifestIndexBlock
+
+        return ManifestIndex(
+            manifest_size=self._manifest_size,
+            block_entry_count=self.block_entry_count,
+            blocks=tuple(
+                ManifestIndexBlock(first_path=p, offset=o) for p, o in self._blocks
+            ),
+        )
 
     def write_files(
         self,
@@ -281,14 +322,6 @@ class ManifestReader:
                         f"Invalid manifest entry at line {line_number} in {self.manifest_path}: {error}"
                     ) from error
 
-    def get_entry(self, logical_path: str) -> ManifestEntry | None:
-        match: ManifestEntry | None = None
-        for entry in self.iter_entries():
-            if entry.path == logical_path:
-                match = entry
-        return match
-
-
 def build_manifest_entries(
     files: Iterable[str | Path],
     *,
@@ -316,6 +349,7 @@ def build_manifest_entries(
 @dataclass(frozen=True)
 class FileEntry:
     path: Path
+    relative_path: str
     size: int
     mtime_ns: int
 
@@ -323,7 +357,7 @@ class FileEntry:
 def walk_files(root: str | Path) -> Iterator[FileEntry]:
     root_path = Path(root).resolve()
 
-    def iter_dir(path: Path) -> Iterator[FileEntry]:
+    def iter_dir(path: Path, rel_parts: tuple[str, ...]) -> Iterator[FileEntry]:
         try:
             entries = sorted(os.scandir(path), key=lambda entry: entry.name)
         except PermissionError:
@@ -332,13 +366,15 @@ def walk_files(root: str | Path) -> Iterator[FileEntry]:
             if entry.name == ".fluxel":
                 continue
             if entry.is_dir(follow_symlinks=False):
-                yield from iter_dir(Path(entry.path))
+                yield from iter_dir(Path(entry.path), rel_parts + (entry.name,))
             elif entry.is_file(follow_symlinks=False):
                 stat = entry.stat()
+                rel_path = "/".join(rel_parts + (entry.name,))
                 yield FileEntry(
                     path=Path(entry.path),
+                    relative_path=rel_path,
                     size=stat.st_size,
                     mtime_ns=stat.st_mtime_ns,
                 )
 
-    yield from iter_dir(root_path)
+    yield from iter_dir(root_path, ())

@@ -1,15 +1,7 @@
-# Fluxel Guardrails (Permanent):
-# - DO NOT optimize for ML throughput in canonical storage (`blobs/`): no sharding, tarballs, or parquet in the blob layer.
-# - DO NOT read blob data for metadata-only operations (diff, list, log, status).
-# - DO NOT introduce a server, daemon, or central database; Fluxel is 100% client-side/serverless.
-# - DO NOT use SHA-1/SHA-256; use Blake3 for all content hashing.
-# - PREFER JSONL manifests to preserve streaming and O(1) memory usage.
-
 from __future__ import annotations
 
 import os
 import subprocess
-import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -149,8 +141,7 @@ class S3StorageBackend:
         try:
             self.client.put_object(**kwargs)
         except ClientError as error:
-            code = error.response.get("Error", {}).get("Code", "")
-            if if_none_match and code in {"PreconditionFailed", "412"}:
+            if if_none_match and _s3_is_precondition_failed(error):
                 raise OptimisticLockError(
                     f"Path already exists: {relative_path}"
                 ) from error
@@ -161,8 +152,7 @@ class S3StorageBackend:
             self.client.head_object(Bucket=self.bucket, Key=self._key(relative_path))
             return True
         except ClientError as error:
-            code = error.response.get("Error", {}).get("Code", "")
-            if code in {"404", "NoSuchKey", "NotFound"}:
+            if _s3_is_404(error):
                 return False
             raise
 
@@ -179,17 +169,27 @@ class S3StorageBackend:
                     key = key[len(self.prefix) + 1 :]
                 yield key
 
+    def delete(self, relative_path: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=self._key(relative_path))
+
     def etag(self, relative_path: str) -> str | None:
         try:
             response = self.client.head_object(
                 Bucket=self.bucket, Key=self._key(relative_path)
             )
         except ClientError as error:
-            code = error.response.get("Error", {}).get("Code", "")
-            if code in {"404", "NoSuchKey", "NotFound"}:
+            if _s3_is_404(error):
                 return None
             raise
         return response.get("ETag", "").strip('"') or None
+
+
+def _s3_is_404(error: ClientError) -> bool:
+    return error.response.get("Error", {}).get("Code", "") in {"404", "NoSuchKey", "NotFound"}
+
+
+def _s3_is_precondition_failed(error: ClientError) -> bool:
+    return error.response.get("Error", {}).get("Code", "") in {"PreconditionFailed", "412"}
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -307,7 +307,16 @@ class S3BlobTransferBackend:
     """Blob transfer backend using boto3 directly."""
 
     def __init__(self, client: object | None = None) -> None:
-        self.client = client or boto3.client("s3")
+        self._client = client or boto3.client("s3")
+        self._backends: dict[str, S3StorageBackend] = {}
+
+    def _backend(self, remote_uri: str) -> tuple[S3StorageBackend, str]:
+        bucket, key = parse_s3_uri(remote_uri)
+        if bucket not in self._backends:
+            self._backends[bucket] = S3StorageBackend(
+                bucket, prefix="", client=self._client
+            )
+        return self._backends[bucket], key
 
     def upload(
         self,
@@ -316,32 +325,20 @@ class S3BlobTransferBackend:
         *,
         if_not_exists: bool = False,
     ) -> None:
-        bucket, key = parse_s3_uri(remote_uri)
-        kwargs = {"Bucket": bucket, "Key": key, "Body": Path(local_path).read_bytes()}
-        if if_not_exists:
-            kwargs["IfNoneMatch"] = "*"
-        try:
-            self.client.put_object(**kwargs)
-        except ClientError as error:
-            code = error.response.get("Error", {}).get("Code", "")
-            if if_not_exists and code in {"PreconditionFailed", "412"}:
-                raise OptimisticLockError(
-                    f"Object already exists: {remote_uri}"
-                ) from error
-            raise
+        backend, key = self._backend(remote_uri)
+        backend.write_bytes(
+            key,
+            Path(local_path).read_bytes(),
+            if_none_match=if_not_exists,
+        )
 
     def download(self, remote_uri: str, local_path: str) -> None:
-        bucket, key = parse_s3_uri(remote_uri)
-        response = self.client.get_object(Bucket=bucket, Key=key)
-        body = response["Body"]
-        try:
-            Path(local_path).write_bytes(body.read())
-        finally:
-            body.close()
+        backend, key = self._backend(remote_uri)
+        Path(local_path).write_bytes(backend.read_bytes(key))
 
     def list_objects(self, uri_prefix: str) -> Iterator[S3ObjectMetadata]:
         bucket, prefix = parse_s3_uri(uri_prefix)
-        paginator = self.client.get_paginator("list_objects_v2")
+        paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
                 yield S3ObjectMetadata(
@@ -352,19 +349,12 @@ class S3BlobTransferBackend:
                 )
 
     def delete(self, remote_uri: str) -> None:
-        bucket, key = parse_s3_uri(remote_uri)
-        self.client.delete_object(Bucket=bucket, Key=key)
+        backend, key = self._backend(remote_uri)
+        backend.delete(key)
 
     def exists(self, remote_uri: str) -> bool:
-        bucket, key = parse_s3_uri(remote_uri)
-        try:
-            self.client.head_object(Bucket=bucket, Key=key)
-            return True
-        except ClientError as error:
-            code = error.response.get("Error", {}).get("Code", "")
-            if code in {"404", "NoSuchKey", "NotFound"}:
-                return False
-            raise
+        backend, key = self._backend(remote_uri)
+        return backend.exists(key)
 
 
 class S5CmdBlobTransferBackend:

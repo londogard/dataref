@@ -1,7 +1,8 @@
 [SCALE TEST] Performance Summary:
-  Generate 1M files:       109.84s (9105 files/sec)
-  Commit + manifest:       71.41s (14004 files/sec)
-  Single lookup:           7.863ms
-  Prefix list (200):       8.232ms
-  Bulk metadata (200):     0.019ms
-  Cached prefix list:      9.774ms
+  Generate 1M files:       159.22s (6281 files/sec)
+  Commit + manifest:       63.64s (15714 files/sec)
+  Single lookup:           7.637ms
+  Prefix list (200):       11.124ms
+  Bulk metadata (200):     0.031ms
+  Cached prefix list:      9.558ms
+PASSED

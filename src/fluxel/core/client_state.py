@@ -1,19 +1,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from .repository_store import BranchRefState
+
 
 HEAD_FILE = "HEAD"
-
-
-@dataclass(frozen=True)
-class LocalBranchSnapshot:
-    branch: str
-    commit_id: str | None
-    version_token: str | None
 
 
 class LocalClientState:
@@ -59,12 +53,12 @@ class LocalClientState:
             return
         self._atomic_write_text(stage_path, payload)
 
-    def read_branch_snapshot(self, branch: str) -> LocalBranchSnapshot | None:
+    def read_branch_snapshot(self, branch: str) -> BranchRefState | None:
         snapshot_path = self.branch_snapshot_path(branch)
         if not snapshot_path.exists():
             return None
         payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
-        return LocalBranchSnapshot(
+        return BranchRefState(
             branch=branch,
             commit_id=payload.get("commit_id"),
             version_token=payload.get("version_token"),

@@ -1,10 +1,3 @@
-# Fluxel Guardrails (Permanent):
-# - DO NOT optimize for ML throughput in canonical storage (`blobs/`): no sharding, tarballs, or parquet in the blob layer.
-# - DO NOT read blob data for metadata-only operations (diff, list, log, status).
-# - DO NOT introduce a server, daemon, or central database; Fluxel is 100% client-side/serverless.
-# - DO NOT use SHA-1/SHA-256; use Blake3 for all content hashing.
-# - PREFER JSONL manifests to preserve streaming and O(1) memory usage.
-
 from __future__ import annotations
 
 import json
@@ -22,6 +15,11 @@ from .config import load_config, validate_config
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file
 from .layout import blob_relpath, initialize_fluxel_layout
 from .manifest import ManifestEntry, ManifestWriter, walk_files, FileEntry
+from .manifest_index import (
+    DEFAULT_INDEX_BLOCK_ENTRY_COUNT,
+    ManifestIndex,
+    load_manifest_index_from_data,
+)
 from .repository_store import (
     BranchRefState,
     LocalRepositoryStore,
@@ -59,6 +57,7 @@ class CommitObject:
     parent: str | None
     created_at: str
     branch: str
+    manifest_index: ManifestIndex | None = None
 
 
 @dataclass(frozen=True)
@@ -198,6 +197,7 @@ class FluxelRepository:
         self.client_state = client_state or LocalClientState(self.layout.root)
         self._resolved_ref_cache: dict[str, BranchRefState] = {}
         self._commit_cache: dict[str, CommitObject] = {}
+        self._last_manifest_index: ManifestIndex | None = None
         self._ensure_head(default_branch="main")
 
     @property
@@ -500,10 +500,12 @@ class FluxelRepository:
         source_paths: list[str] = []
         moved_paths: list[str] = []
         path_map: dict[str, str] = {}
+        updated_entries: dict[str, ManifestEntry] = {}
 
         for entry in self.store.iter_manifest_entries(base_commit.manifest):
             existing_paths.add(entry.path)
             if not matches_logical_path(entry.path, source):
+                updated_entries[entry.path] = entry
                 continue
             moved_path = move_logical_path(
                 entry.path,
@@ -513,6 +515,8 @@ class FluxelRepository:
             source_paths.append(entry.path)
             moved_paths.append(moved_path)
             path_map[entry.path] = moved_path
+            relocated_entry = relocate_manifest_entry(entry, moved_path)
+            updated_entries[relocated_entry.path] = relocated_entry
 
         if not path_map:
             raise FileNotFoundError(f"Path not found in branch '{branch}': {source}")
@@ -525,15 +529,6 @@ class FluxelRepository:
                 raise ValueError(
                     f"Destination already exists in branch '{branch}': {moved_path}"
                 )
-
-        updated_entries: dict[str, ManifestEntry] = {}
-        for entry in self.store.iter_manifest_entries(base_commit.manifest):
-            moved_path = path_map.get(entry.path)
-            if moved_path is None:
-                updated_entries[entry.path] = entry
-                continue
-            relocated_entry = relocate_manifest_entry(entry, moved_path)
-            updated_entries[relocated_entry.path] = relocated_entry
 
         def iter_entries() -> Iterator[ManifestEntry]:
             for path in sorted(updated_entries):
@@ -600,8 +595,7 @@ class FluxelRepository:
 
         working_files: dict[str, FileEntry] = {}
         for file_entry in walk_files(self.root):
-            relative = file_entry.path.relative_to(self.root).as_posix()
-            working_files[relative] = file_entry
+            working_files[file_entry.relative_path] = file_entry
         working_paths = set(working_files)
 
         added_paths: list[str] = []
@@ -631,6 +625,9 @@ class FluxelRepository:
         if commit_payload is None:
             raise ValueError(f"Unknown commit: {commit_id}")
         data = json.loads(commit_payload.decode("utf-8"))
+        manifest_index = None
+        if "manifest_index" in data:
+            manifest_index = load_manifest_index_from_data(data["manifest_index"])
         commit = CommitObject(
             id=str(data["id"]),
             message=str(data["message"]),
@@ -638,6 +635,7 @@ class FluxelRepository:
             parent=str(data["parent"]) if data["parent"] else None,
             created_at=str(data["created_at"]),
             branch=str(data["branch"]),
+            manifest_index=manifest_index,
         )
         self._commit_cache[commit_id] = commit
         return commit
@@ -808,31 +806,12 @@ class FluxelRepository:
         manifest_hash = blake3_digest_file(temp_manifest)
         self._persist_manifest(temp_manifest, manifest_hash)
 
-        commit_body = {
-            "message": f"verify {ref}",
-            "manifest": manifest_hash,
-            "parent": base_commit_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "branch": ref,
-        }
-        canonical = json.dumps(
-            commit_body, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        commit_id = blake3(canonical).hexdigest()
-        commit_object = CommitObject(id=commit_id, **commit_body)
-        self._commit_cache[commit_id] = commit_object
-
-        self.store.write_commit_bytes(
-            commit_id,
-            (json.dumps(asdict(commit_object), indent=2, sort_keys=True) + "\n").encode(
-                "utf-8"
-            ),
-        )
-        self._update_branch_ref(
+        commit_id = self._write_commit_object(
             branch=ref,
-            commit_id=commit_id,
+            message=f"verify {ref}",
+            parent_commit=base_commit_id,
+            manifest_hash=manifest_hash,
             expected_version_token=branch_state.version_token,
-            expected_commit_id=branch_state.commit_id,
             operation="verify",
         )
         return VerifyResult(
@@ -888,12 +867,13 @@ class FluxelRepository:
                 for entry in self.store.iter_manifest_entries_for_prefix(
                     commit.manifest,
                     normalized_prefix,
+                    manifest_index=commit.manifest_index,
                 )
             }
 
         if include_staging:
             for change in self._load_stage(ref).values():
-                if normalized_prefix and not _matches_logical_prefix(
+                if normalized_prefix and not matches_logical_path(
                     change.path,
                     normalized_prefix,
                 ):
@@ -935,23 +915,27 @@ class FluxelRepository:
 
         resolved_commit_id = commit_id or self.resolve_ref(ref)
         commit = self.read_commit(resolved_commit_id)
-        return self.store.lookup_manifest_entry(commit.manifest, normalized_path)
+        return self.store.lookup_manifest_entry(
+            commit.manifest,
+            normalized_path,
+            manifest_index=commit.manifest_index,
+        )
 
     def _materialize_blobs_and_entries(
         self, *, identity_mode: str
-    ) -> Iterator[str]:
+    ) -> Iterator[tuple[str, str]]:
         for entry in walk_files(self.root):
-            relative_path = entry.path.relative_to(self.root).as_posix()
+            relative_path = entry.relative_path
             if identity_mode == "blake3":
                 identity_value = blake3_digest_file(entry.path)
                 self._store_blob(entry.path, identity_value)
-                yield json.dumps(
+                yield relative_path, json.dumps(
                     ["b", relative_path, identity_value, entry.size, entry.mtime_ns],
                     separators=(",", ":"),
                 )
             else:
                 identity_value = metadata_identity(relative_path, entry.size)
-                yield json.dumps(
+                yield relative_path, json.dumps(
                     ["m", relative_path, identity_value, entry.size, entry.mtime_ns, entry.path.as_uri()],
                     separators=(",", ":"),
                 )
@@ -1270,11 +1254,7 @@ class FluxelRepository:
     def _require_branch_state(self, branch: str) -> BranchRefState:
         cached_state = self.client_state.read_branch_snapshot(branch)
         if cached_state is not None:
-            return BranchRefState(
-                branch=branch,
-                commit_id=cached_state.commit_id,
-                version_token=cached_state.version_token,
-            )
+            return cached_state
 
         branch_state = self.store.read_branch_ref(branch)
         if branch_state is None:
@@ -1318,18 +1298,33 @@ class FluxelRepository:
         expected_version_token: str | None,
         operation: str,
     ) -> str:
-        commit_body = {
+        commit_body: dict[str, object] = {
             "message": message,
             "manifest": manifest_hash,
             "parent": parent_commit,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "branch": branch,
         }
+        manifest_index = self._last_manifest_index
+        if manifest_index is not None:
+            commit_body["manifest_index"] = {
+                "manifest_size": manifest_index.manifest_size,
+                "block_entry_count": manifest_index.block_entry_count,
+                "blocks": [[b.first_path, b.offset] for b in manifest_index.blocks],
+            }
         canonical = json.dumps(
             commit_body, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         commit_id = blake3(canonical).hexdigest()
-        commit_object = CommitObject(id=commit_id, **commit_body)
+        commit_object = CommitObject(
+            id=commit_id,
+            message=message,
+            manifest=manifest_hash,
+            parent=parent_commit,
+            created_at=str(commit_body["created_at"]),
+            branch=branch,
+            manifest_index=manifest_index,
+        )
         self._commit_cache[commit_id] = commit_object
         self.store.write_commit_bytes(
             commit_id,
@@ -1441,7 +1436,9 @@ class FluxelRepository:
         if paths:
             entries: dict[str, ManifestEntry] = {}
             for p in paths:
-                entry = self.store.lookup_manifest_entry(commit.manifest, p)
+                entry = self.store.lookup_manifest_entry(
+                    commit.manifest, p, manifest_index=commit.manifest_index
+                )
                 if entry is not None:
                     entries[p] = entry
         else:
@@ -1587,26 +1584,39 @@ class FluxelRepository:
             current_commit_id=current_state.commit_id if current_state else None,
         )
 
-    def _write_temp_manifest(self, entries: Iterator[ManifestEntry | str]) -> Path:
+    def _write_temp_manifest(
+        self, entries: Iterator[ManifestEntry | str], *, build_index: bool = True
+    ) -> Path:
         with NamedTemporaryFile(
             mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
         ) as temp:
             temp_path = Path(temp.name)
-        writer = ManifestWriter(temp_path)
+        block_count = DEFAULT_INDEX_BLOCK_ENTRY_COUNT if build_index else 0
+        writer = ManifestWriter(temp_path, block_entry_count=block_count)
         writer.write_entries(entries)
+        self._last_manifest_index = writer.build_index()
         return temp_path
 
     def _write_temp_manifest_index(self, manifest_path: Path) -> Path:
+        index = self._last_manifest_index
+        if index is not None:
+            payload = {
+                "manifest_size": index.manifest_size,
+                "block_entry_count": index.block_entry_count,
+                "blocks": [[b.first_path, b.offset] for b in index.blocks],
+            }
+            with NamedTemporaryFile(mode="wb", suffix=".idx", delete=False) as temp:
+                temp_path = Path(temp.name)
+                temp.write(
+                    json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                )
+            return temp_path
         return build_manifest_index_file(manifest_path)
 
 
 def _default_remote_client_root(worktree_root: Path, repo_uri: str) -> Path:
     repo_id = blake3(repo_uri.encode("utf-8")).hexdigest()[:16]
     return worktree_root / ".fluxel" / "clients" / repo_id
-
-
-def _matches_logical_prefix(path: str, logical_prefix: str) -> bool:
-    return path == logical_prefix or path.startswith(f"{logical_prefix}/")
 
 
 def _stage_change_dict(change: StageChange) -> dict[str, object]:
@@ -1941,12 +1951,6 @@ def generate_transfer_commands(
     include_metadata: bool = False,
 ) -> list[str]:
     repo_root = Path(root).resolve()
-    store = LocalRepositoryStore(repo_root)
-    repo = FluxelRepository(
-        repo_root,
-        store=store,
-        client_state=LocalClientState(repo_root),
-    )
-    return repo.generate_transfer_commands(
+    return FluxelRepository(repo_root).generate_transfer_commands(
         ref, mode=mode, include_metadata=include_metadata
     )

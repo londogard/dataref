@@ -1,4 +1,4 @@
-# Spec (Human Authored)
+# Spec
 
 ## Overview
 
