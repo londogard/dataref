@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
+import msgspec
 
 CURRENT_FORMAT_VERSION = 1
 SUPPORTED_FORMAT_VERSIONS: frozenset[int] = frozenset({1})
@@ -12,20 +12,24 @@ SUPPORTED_FORMAT_VERSIONS: frozenset[int] = frozenset({1})
 BackendType = Literal["local", "s3"]
 
 
-@dataclass
-class S3Config:
+class S3Config(msgspec.Struct):
     bucket: str = ""
     prefix: str = ""
     endpoint_url: str | None = None
 
 
-@dataclass
-class FluxelConfig:
-    format_version: int = CURRENT_FORMAT_VERSION
+class FluxelConfig(msgspec.Struct):
+    format_version: Literal[1] = CURRENT_FORMAT_VERSION  # TODO: fix
     backend: BackendType = "local"
-    dataset_root: str = "."
+    dataset_root: Annotated[
+        str, msgspec.Meta(description="Root directory for the dataset")
+    ] = "."
     default_branch: str = "main"
     s3: S3Config | None = None
+
+    def __post_init__(self) -> None:
+        # This will raise a msgspec.ValidationError if anything is wrong (like None)
+        msgspec.convert(msgspec.structs.asdict(self), type(self))
 
 
 CONFIG_FILENAME = "config.json"
@@ -39,8 +43,8 @@ def load_config(root: str | Path) -> FluxelConfig | None:
     path = config_path(root)
     if not path.exists():
         return None
-    raw = json.loads(path.read_text("utf-8"))
-    return _deserialize(raw)
+    raw = path.read_text("utf-8")
+    return msgspec.json.decode(raw, type=FluxelConfig)
 
 
 def save_config(root: str | Path, config: FluxelConfig) -> Path:
@@ -105,7 +109,9 @@ def validate_config(config: FluxelConfig) -> None:
     if config.backend == "local":
         root_path = Path(config.dataset_root)
         if not root_path.exists():
-            raise ValueError(f"Local dataset root does not exist: {config.dataset_root}")
+            raise ValueError(
+                f"Local dataset root does not exist: {config.dataset_root}"
+            )
         if not (root_path / ".fluxel").is_dir():
             raise ValueError(
                 f"Not a fluxel repository (no .fluxel directory): {config.dataset_root}"
@@ -120,25 +126,5 @@ def _serialize(config: FluxelConfig) -> dict[str, object]:
         "default_branch": config.default_branch,
     }
     if config.s3 is not None:
-        result["s3"] = asdict(config.s3)
+        result["s3"] = msgspec.to_builtins(config.s3)
     return result
-
-
-def _deserialize(raw: dict[str, object]) -> FluxelConfig:
-    s3_raw = raw.get("s3")
-    s3_config: S3Config | None = None
-    if isinstance(s3_raw, dict):
-        s3_config = S3Config(
-            bucket=str(s3_raw.get("bucket", "")),
-            prefix=str(s3_raw.get("prefix", "")),
-            endpoint_url=(
-                str(s3_raw["endpoint_url"]) if s3_raw.get("endpoint_url") else None
-            ),
-        )
-    return FluxelConfig(
-        format_version=int(raw.get("format_version", CURRENT_FORMAT_VERSION)),
-        backend=str(raw.get("backend", "local")),  # type: ignore[assignment]
-        dataset_root=str(raw.get("dataset_root", ".")),
-        default_branch=str(raw.get("default_branch", "main")),
-        s3=s3_config,
-    )
