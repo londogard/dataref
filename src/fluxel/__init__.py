@@ -1,12 +1,11 @@
 from .cli import build_parser, main, run_cli
 from .core import (
     DEFAULT_CHUNK_SIZE,
+    BaseConfig,
     FluxelConfig,
+    LocalConfig,
     S3Config,
     init_config,
-    load_config,
-    save_config,
-    validate_config,
     AnalyticalIndexPaths,
     BlobTransferBackend,
     LocalClientState,
@@ -66,12 +65,11 @@ from .core import (
 
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
+    "BaseConfig",
     "FluxelConfig",
+    "LocalConfig",
     "S3Config",
     "init_config",
-    "load_config",
-    "save_config",
-    "validate_config",
     "AnalyticalIndexPaths",
     "BlobTransferBackend",
     "LocalClientState",

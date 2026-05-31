@@ -1,5 +1,5 @@
 from .client_state import LocalClientState
-from .config import FluxelConfig, S3Config, init_config, load_config, save_config, validate_config
+from .config import BaseConfig, FluxelConfig, LocalConfig, S3Config, init_config
 from .filesystem import FluxelFileSystem, FluxelURI
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file, blake3_digest_stream
 from .index import (
@@ -69,12 +69,11 @@ from .storage import (
 
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
+    "BaseConfig",
     "FluxelConfig",
+    "LocalConfig",
     "S3Config",
     "init_config",
-    "load_config",
-    "save_config",
-    "validate_config",
     "AnalyticalIndexPaths",
     "LocalClientState",
     "BlobTransferBackend",

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from botocore.exceptions import BotoCoreError, ClientError
+import msgspec
 from simple_parsing import ArgumentParser
 from simple_parsing.helpers import field, flag, subparsers
 
@@ -28,20 +29,16 @@ from .core import (
     rm,
     status,
     verify,
-    log,
     checkout,
     restore_files,
     open_repository,
 )
 from .core.config import (
-    BackendType,
+    BaseConfig,
     FluxelConfig,
+    LocalConfig,
     S3Config,
-    _serialize as serialize_config,
     init_config,
-    load_config,
-    save_config,
-    validate_config,
 )
 
 IdentityMode = Literal["blake3", "meta"]
@@ -340,7 +337,10 @@ class ConfigInitArgs:
 
 @dataclass
 class ConfigGetArgs:
-    key: str = field(positional=True, help="Config key (e.g. backend, dataset_root, default_branch, s3.bucket)")
+    key: str = field(
+        positional=True,
+        help="Config key (e.g. backend, dataset_root, default_branch, s3.bucket)",
+    )
     root: str = field(
         default=".",
         alias="--repo",
@@ -350,7 +350,9 @@ class ConfigGetArgs:
 
 @dataclass
 class ConfigSetArgs:
-    key: str = field(positional=True, help="Config key (e.g. backend, dataset_root, s3.bucket)")
+    key: str = field(
+        positional=True, help="Config key (e.g. backend, dataset_root, s3.bucket)"
+    )
     value: str = field(positional=True, help="Config value")
     root: str = field(
         default=".",
@@ -370,13 +372,15 @@ class ConfigListArgs:
 
 @dataclass
 class ConfigArgs:
-    command: ConfigInitArgs | ConfigGetArgs | ConfigSetArgs | ConfigListArgs = subparsers(
-        {
-            "init": ConfigInitArgs,
-            "get": ConfigGetArgs,
-            "set": ConfigSetArgs,
-            "list": ConfigListArgs,
-        }
+    command: ConfigInitArgs | ConfigGetArgs | ConfigSetArgs | ConfigListArgs = (
+        subparsers(
+            {
+                "init": ConfigInitArgs,
+                "get": ConfigGetArgs,
+                "set": ConfigSetArgs,
+                "list": ConfigListArgs,
+            }
+        )
     )
 
 
@@ -524,7 +528,11 @@ def build_parser() -> ArgumentParser:
 
 
 def _print_status(stage: object) -> None:
-    if stage.working_tree_added or stage.working_tree_removed or stage.working_tree_modified:
+    if (
+        stage.working_tree_added
+        or stage.working_tree_removed
+        or stage.working_tree_modified
+    ):
         if stage.working_tree_added:
             print("Working tree changes:")
             for path in stage.working_tree_added:
@@ -543,7 +551,11 @@ def _print_status(stage: object) -> None:
             print(f"  added:    {path}")
         for path in stage.removed:
             print(f"  removed:  {path}")
-    elif not stage.working_tree_added and not stage.working_tree_removed and not stage.working_tree_modified:
+    elif (
+        not stage.working_tree_added
+        and not stage.working_tree_removed
+        and not stage.working_tree_modified
+    ):
         print("Nothing to commit, working tree clean")
 
 
@@ -573,47 +585,61 @@ def _flatten_option_values(values: list[object]) -> list[str]:
 
 def _config_get_value(config: FluxelConfig, key: str) -> object | None:
     if key == "backend":
-        return config.backend
+        return "s3" if isinstance(config, S3Config) else "local"
     if key == "dataset_root":
         return config.dataset_root
     if key == "default_branch":
         return config.default_branch
     if key == "s3.bucket":
-        return config.s3.bucket if config.s3 else None
+        return config.bucket if isinstance(config, S3Config) else None
     if key == "s3.prefix":
-        return config.s3.prefix if config.s3 else None
+        return config.prefix if isinstance(config, S3Config) else None
     if key == "s3.endpoint_url":
-        return config.s3.endpoint_url if config.s3 else None
+        return config.endpoint_url if isinstance(config, S3Config) else None
     return None
 
 
-def _config_set_value(config: FluxelConfig, key: str, value: str) -> None:
+def _config_set_value(config: FluxelConfig, key: str, value: str) -> FluxelConfig:
     if key == "backend":
         if value not in ("local", "s3"):
             raise ValueError(f"Backend must be 'local' or 's3', got: {value}")
-        config.backend = value  # type: ignore[assignment]
-        if value == "s3" and config.s3 is None:
-            config.s3 = S3Config()
-        if value == "local":
-            config.s3 = None
+        if value == "s3":
+            bucket = config.bucket if isinstance(config, S3Config) else ""
+            try:
+                return S3Config(
+                    dataset_root=config.dataset_root,
+                    default_branch=config.default_branch,
+                    bucket=bucket,
+                )
+            except ValueError:
+                raise ValueError("Cannot switch to S3 backend without a bucket. Set s3.bucket first.")
+        return LocalConfig(
+            dataset_root=config.dataset_root,
+            default_branch=config.default_branch,
+        )
     elif key == "dataset_root":
         config.dataset_root = value
     elif key == "default_branch":
         config.default_branch = value
     elif key == "s3.bucket":
-        if config.s3 is None:
-            config.s3 = S3Config()
-        config.s3.bucket = value
+        if isinstance(config, LocalConfig):
+            return S3Config(
+                dataset_root=config.dataset_root,
+                default_branch=config.default_branch,
+                bucket=value,
+            )
+        config.bucket = value
     elif key == "s3.prefix":
-        if config.s3 is None:
-            config.s3 = S3Config()
-        config.s3.prefix = value
+        if not isinstance(config, S3Config):
+            raise ValueError("Cannot set s3.prefix on a local config")
+        config.prefix = value
     elif key == "s3.endpoint_url":
-        if config.s3 is None:
-            config.s3 = S3Config()
-        config.s3.endpoint_url = value
+        if not isinstance(config, S3Config):
+            raise ValueError("Cannot set s3.endpoint_url on a local config")
+        config.endpoint_url = value
     else:
         raise ValueError(f"Unknown config key: {key}")
+    return config
 
 
 def _command_name(command: object) -> str:
@@ -711,8 +737,22 @@ def run_cli(argv: list[str] | None = None) -> int:
 
         if isinstance(command, RmArgs):
             if command.message:
-                result = remove(root=command.root, paths=command.paths, message=command.message, ref=command.ref)
-                print(json.dumps({"ref": result.ref, "commit_id": result.commit_id, "removed_paths": result.removed_paths}, indent=2))
+                result = remove(
+                    root=command.root,
+                    paths=command.paths,
+                    message=command.message,
+                    ref=command.ref,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "ref": result.ref,
+                            "commit_id": result.commit_id,
+                            "removed_paths": result.removed_paths,
+                        },
+                        indent=2,
+                    )
+                )
                 return 0
             stage = rm(root=command.root, paths=command.paths, ref=command.ref)
             print(json.dumps(_stage_payload(stage), indent=2))
@@ -727,7 +767,18 @@ def run_cli(argv: list[str] | None = None) -> int:
                     message=command.message,
                     ref=command.ref,
                 )
-                print(json.dumps({"ref": result.ref, "commit_id": result.commit_id, "source_path": result.source_path, "destination_path": result.destination_path, "moved_paths": result.moved_paths}, indent=2))
+                print(
+                    json.dumps(
+                        {
+                            "ref": result.ref,
+                            "commit_id": result.commit_id,
+                            "source_path": result.source_path,
+                            "destination_path": result.destination_path,
+                            "moved_paths": result.moved_paths,
+                        },
+                        indent=2,
+                    )
+                )
                 return 0
             stage = move_staged(
                 root=command.root,
@@ -875,7 +926,9 @@ def run_cli(argv: list[str] | None = None) -> int:
                         print(f"Parent: {c.parent}")
                     print(f"Branch: {c.branch}")
                     print()
-                    msg_indented = "\n".join(f"    {line}" for line in c.message.splitlines())
+                    msg_indented = "\n".join(
+                        f"    {line}" for line in c.message.splitlines()
+                    )
                     print(msg_indented)
             return 0
 
@@ -915,11 +968,11 @@ def run_cli(argv: list[str] | None = None) -> int:
                     s3_prefix=config_command.s3_prefix,
                     s3_endpoint_url=config_command.s3_endpoint,
                 )
-                path = save_config(config_command.root, config)
+                path = config.save(config_command.root)
                 print(f"Config initialized: {path}")
                 return 0
             if isinstance(config_command, ConfigGetArgs):
-                config = load_config(config_command.root)
+                config = BaseConfig.load(config_command.root)
                 if config is None:
                     print(
                         "No config found. Run 'fluxel config init' first.",
@@ -939,27 +992,29 @@ def run_cli(argv: list[str] | None = None) -> int:
                     print(json.dumps(value))
                 return 0
             if isinstance(config_command, ConfigSetArgs):
-                config = load_config(config_command.root)
+                config = BaseConfig.load(config_command.root)
                 if config is None:
                     print(
                         "No config found. Run 'fluxel config init' first.",
                         file=sys.stderr,
                     )
                     return 2
-                _config_set_value(config, config_command.key, config_command.value)
-                path = save_config(config_command.root, config)
+                config = _config_set_value(
+                    config, config_command.key, config_command.value
+                )
+                path = config.save(config_command.root)
                 print(f"Updated: {config_command.key}={config_command.value}")
                 return 0
             if isinstance(config_command, ConfigListArgs):
-                config = load_config(config_command.root)
+                config = BaseConfig.load(config_command.root)
                 if config is None:
                     print(
                         "No config found. Run 'fluxel config init' first.",
                         file=sys.stderr,
                     )
                     return 2
-                raw = serialize_config(config)
-                print(json.dumps(raw, indent=2))
+                raw = msgspec.json.format(msgspec.json.encode(config).decode("utf-8"))
+                print(raw)
                 return 0
 
         if isinstance(command, CheckoutArgs):
@@ -974,10 +1029,15 @@ def run_cli(argv: list[str] | None = None) -> int:
                     print("Nothing to restore")
                 else:
                     rel_paths = "\n".join(f"  restored: {p}" for p in restored)
-                    print(f"Restored {len(restored)} file(s) from '{command.ref}':\n{rel_paths}")
+                    print(
+                        f"Restored {len(restored)} file(s) from '{command.ref}':\n{rel_paths}"
+                    )
                 return 0
             if command.name is None:
-                print("Either specify --ref <ref> to restore files or a branch name to switch to", file=sys.stderr)
+                print(
+                    "Either specify --ref <ref> to restore files or a branch name to switch to",
+                    file=sys.stderr,
+                )
                 return 2
             checkout(command.root, command.name)
             print(f"Switched to branch '{command.name}'")

@@ -6,12 +6,11 @@ from pathlib import Path
 from fluxel import run_cli
 from fluxel.core.config import (
     CURRENT_FORMAT_VERSION,
+    BaseConfig,
     FluxelConfig,
+    LocalConfig,
     S3Config,
-    load_config,
     init_config,
-    save_config,
-    validate_config,
 )
 from fluxel.core.repository import FluxelRepository
 
@@ -21,12 +20,10 @@ def test_config_init_via_cli_creates_config_file(tmp_path: Path, capsys) -> None
     assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
     capsys.readouterr()
 
-    config = load_config(tmp_path)
-    assert config is not None
-    assert config.backend == "local"
+    config = BaseConfig.load(tmp_path)
+    assert isinstance(config, LocalConfig)
     assert config.dataset_root == str(tmp_path)
     assert config.default_branch == "main"
-    assert config.s3 is None
 
 
 def test_config_init_s3_via_cli(tmp_path: Path, capsys) -> None:
@@ -54,12 +51,10 @@ def test_config_init_s3_via_cli(tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out.strip()
     assert "Config initialized" in out
 
-    config = load_config(repo)
-    assert config is not None
-    assert config.backend == "s3"
-    assert config.s3 is not None
-    assert config.s3.bucket == "my-bucket"
-    assert config.s3.prefix == "datasets/my-repo"
+    config = BaseConfig.load(repo)
+    assert isinstance(config, S3Config)
+    assert config.bucket == "my-bucket"
+    assert config.prefix == "datasets/my-repo"
 
 
 def test_config_list_via_cli(tmp_path: Path, capsys) -> None:
@@ -101,7 +96,7 @@ def test_config_set_via_cli(tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out.strip()
     assert "default_branch=develop" in out
 
-    config = load_config(tmp_path)
+    config = BaseConfig.load(tmp_path)
     assert config is not None
     assert config.default_branch == "develop"
 
@@ -126,23 +121,21 @@ def test_config_no_config_error(tmp_path: Path, capsys) -> None:
 
 
 def test_validate_config_rejects_missing_dataset_root(tmp_path: Path) -> None:
-    config = FluxelConfig(backend="local", dataset_root="", default_branch="main")
     try:
-        validate_config(config)
+        LocalConfig(dataset_root="", default_branch="main")
         assert False, "Should have raised"
     except ValueError as e:
         assert "dataset_root" in str(e)
 
 
 def test_validate_config_rejects_empty_bucket_for_s3(tmp_path: Path) -> None:
-    config = FluxelConfig(
-        backend="s3",
-        dataset_root=str(tmp_path),
-        default_branch="main",
-        s3=S3Config(bucket="", prefix=""),
-    )
     try:
-        validate_config(config)
+        S3Config(
+            dataset_root=str(tmp_path),
+            default_branch="main",
+            bucket="",
+            prefix="",
+        )
         assert False, "Should have raised"
     except ValueError as e:
         assert "bucket" in str(e)
@@ -158,22 +151,13 @@ def test_config_init_idempotent(tmp_path: Path, capsys) -> None:
 
     init_config(tmp_path, backend="local")
     assert config_path.exists()
-    config = load_config(tmp_path)
-    assert config is not None
-    assert config.backend == "local"
+    config = BaseConfig.load(tmp_path)
+    assert isinstance(config, LocalConfig)
 
 
 def test_config_set_s3_bucket_then_get(tmp_path: Path, capsys) -> None:
     (tmp_path / "f.txt").write_text("x")
     assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
-    capsys.readouterr()
-
-    assert (
-        run_cli(
-            ["config", "set", "--repo", str(tmp_path), "backend", "s3"]
-        )
-        == 0
-    )
     capsys.readouterr()
 
     assert (
@@ -196,13 +180,13 @@ def test_config_set_s3_bucket_then_get(tmp_path: Path, capsys) -> None:
 
 
 def test_config_default_format_version(tmp_path: Path) -> None:
-    config = FluxelConfig(dataset_root=str(tmp_path))
+    config = LocalConfig(dataset_root=str(tmp_path))
     assert config.format_version == 1
 
 
 def test_config_serialize_includes_format_version(tmp_path: Path) -> None:
-    config = FluxelConfig(dataset_root=str(tmp_path))
-    save_config(tmp_path, config)
+    config = LocalConfig(dataset_root=str(tmp_path))
+    config.save(tmp_path)
     raw = json.loads((tmp_path / ".fluxel" / "config.json").read_text("utf-8"))
     assert raw["format_version"] == 1
 
@@ -225,15 +209,14 @@ def test_config_missing_format_version_defaults_to_current(tmp_path: Path) -> No
     (tmp_path / ".fluxel" / "config.json").write_text(
         json.dumps({"backend": "local", "dataset_root": str(tmp_path), "default_branch": "main"})
     )
-    config = load_config(tmp_path)
+    config = BaseConfig.load(tmp_path)
     assert config is not None
     assert config.format_version == 1
 
 
 def test_validate_config_rejects_future_format() -> None:
-    config = FluxelConfig(format_version=2, dataset_root="/tmp")
     try:
-        validate_config(config)
+        LocalConfig(format_version=2, dataset_root="/tmp")
         assert False, "Should have raised"
     except ValueError as e:
         msg = str(e)
@@ -241,9 +224,8 @@ def test_validate_config_rejects_future_format() -> None:
 
 
 def test_validate_config_rejects_unsupported_old_format() -> None:
-    config = FluxelConfig(format_version=0, dataset_root="/tmp")
     try:
-        validate_config(config)
+        LocalConfig(format_version=0, dataset_root="/tmp")
         assert False, "Should have raised"
     except ValueError as e:
         msg = str(e)
@@ -251,24 +233,20 @@ def test_validate_config_rejects_unsupported_old_format() -> None:
 
 
 def test_config_save_and_load_roundtrip(tmp_path: Path) -> None:
-    original = FluxelConfig(
-        backend="s3",
+    original: FluxelConfig = S3Config(
         dataset_root=str(tmp_path),
         default_branch="develop",
-        s3=S3Config(
-            bucket="b",
-            prefix="p",
-            endpoint_url="https://minio.example.com",
-        ),
+        bucket="b",
+        prefix="p",
+        endpoint_url="https://minio.example.com",
     )
-    save_config(tmp_path, original)
+    original.save(tmp_path)
 
-    loaded = load_config(tmp_path)
-    assert loaded is not None
-    assert loaded.backend == "s3"
+    loaded = BaseConfig.load(tmp_path)
+    assert isinstance(loaded, S3Config)
     assert loaded.dataset_root == str(tmp_path)
     assert loaded.default_branch == "develop"
-    assert loaded.s3 is not None
-    assert loaded.s3.bucket == "b"
-    assert loaded.s3.prefix == "p"
-    assert loaded.s3.endpoint_url == "https://minio.example.com"
+    assert isinstance(loaded, S3Config)
+    assert loaded.bucket == "b"
+    assert loaded.prefix == "p"
+    assert loaded.endpoint_url == "https://minio.example.com"

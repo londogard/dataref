@@ -11,7 +11,7 @@ from typing import BinaryIO, Iterator, Literal
 from blake3 import blake3
 
 from .client_state import LocalClientState
-from .config import load_config, validate_config
+from .config import BaseConfig, S3Config
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file
 from .layout import blob_relpath, initialize_fluxel_layout
 from .manifest import ManifestEntry, ManifestWriter, walk_files, FileEntry
@@ -181,9 +181,9 @@ class FluxelRepository:
         blob_transfer: BlobTransferBackend | None = None,
     ) -> None:
         self.layout = initialize_fluxel_layout(root)
-        config = load_config(root)
+        config = BaseConfig.load(root)
         if config is not None:
-            validate_config(config)
+            config.validate()
         self.store = store or LocalRepositoryStore(self.layout.root)
         if isinstance(self.store, S3RepositoryStore) and blob_transfer is not None:
             self.store = S3RepositoryStore(
@@ -1470,15 +1470,15 @@ class FluxelRepository:
         mode: str = "upload",
         include_metadata: bool = False,
     ) -> list[str]:
-        config = load_config(self.root)
-        if config is None or config.backend != "s3" or config.s3 is None:
+        config = BaseConfig.load(self.root)
+        if not isinstance(config, S3Config):
             raise ValueError("S3 backend not configured in repo config")
-        bucket = config.s3.bucket
+        bucket = config.bucket
 
         branch = ref or self.current_branch()
         commit_id = self.resolve_ref(branch)
         commit = self.read_commit(commit_id)
-        s3_prefix = config.s3.prefix or ""
+        s3_prefix = config.prefix or ""
 
         local_store = LocalRepositoryStore(self.root)
         commands: list[str] = []
@@ -1720,11 +1720,11 @@ def open_repository(
         )
 
     repo_root = Path(root).resolve()
-    config = load_config(repo_root)
+    config = BaseConfig.load(repo_root)
 
-    if config is not None and config.backend == "s3" and config.s3 is not None:
-        bucket = config.s3.bucket
-        prefix = config.s3.prefix
+    if isinstance(config, S3Config):
+        bucket = config.bucket
+        prefix = config.prefix
         worktree_root = Path(worktree or repo_root)
         if worktree or client_root:
             resolved_client_root = (
