@@ -12,7 +12,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from .layout import blob_relpath, initialize_fluxel_layout
-from .manifest import ManifestEntry, ManifestReader, deserialize_manifest_entry
+from .manifest import ManifestEntry, ManifestReader
 from .manifest_index import (
     ManifestIndex,
     build_manifest_index,
@@ -243,7 +243,7 @@ class LocalRepositoryStore(RepositoryStore):
             )
         if entry_json is None:
             return None
-        return deserialize_manifest_entry(entry_json)
+        return ManifestEntry.deserialize(entry_json)
 
     def iter_manifest_entries_for_prefix(
         self,
@@ -274,7 +274,7 @@ class LocalRepositoryStore(RepositoryStore):
                 index_path=index_path,
             )
         for entry_json in iter_jsons:
-            yield deserialize_manifest_entry(entry_json)
+            yield ManifestEntry.deserialize(entry_json)
 
     def write_blob_file(
         self,
@@ -407,7 +407,7 @@ class S3RepositoryStore(RepositoryStore):
                 if not line:
                     continue
                 try:
-                    yield deserialize_manifest_entry(line)
+                    yield ManifestEntry.deserialize(line)
                 except ValueError as error:
                     raise ValueError(
                         f"Invalid manifest entry at line {line_number} in {manifest_uri}: {error}"
@@ -550,7 +550,7 @@ class S3RepositoryStore(RepositoryStore):
             )
         if entry_json is None:
             return None
-        return deserialize_manifest_entry(entry_json)
+        return ManifestEntry.deserialize(entry_json)
 
     def iter_manifest_entries_for_prefix(
         self,
@@ -580,7 +580,7 @@ class S3RepositoryStore(RepositoryStore):
                 index_path=index_path,
             )
         for entry_json in iter_jsons:
-            yield deserialize_manifest_entry(entry_json)
+            yield ManifestEntry.deserialize(entry_json)
 
     def write_blob_file(
         self,

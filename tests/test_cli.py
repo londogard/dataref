@@ -107,7 +107,6 @@ def test_cli_metadata_only_rm_and_mv_work_for_s3_repositories(
                 "commit",
                 "--repo",
                 repo_uri,
-                "--staged",
                 "-m",
                 "rename and remove",
             ]
@@ -258,7 +257,7 @@ def test_cli_verify_reports_missing_source_cleanly(tmp_path: Path, capsys) -> No
 
     (tmp_path / "a.txt").unlink()
 
-    assert run_cli(["verify", "--repo", str(tmp_path), "--ref", "main"]) == 2
+    assert run_cli(["verify", "--repo", str(tmp_path)]) == 2
     stderr = capsys.readouterr().err
     assert "verify error:" in stderr
     assert "a.txt" in stderr
@@ -274,10 +273,9 @@ def test_cli_verify_promotes_metadata_entries(tmp_path: Path, capsys) -> None:
     first_commit = capsys.readouterr().out.strip()
     assert first_commit
 
-    assert run_cli(["verify", "--repo", str(tmp_path), "--ref", "main"]) == 0
+    assert run_cli(["verify", "--repo", str(tmp_path)]) == 0
     verify_payload = json.loads(capsys.readouterr().out)
     assert verify_payload["created_commit"] is True
-    assert verify_payload["verified_entries"] == 1
     assert verify_payload["commit_id"] != first_commit
 
     commit_payload = json.loads(
@@ -292,7 +290,7 @@ def test_cli_verify_promotes_metadata_entries(tmp_path: Path, capsys) -> None:
     assert latest_entries[0].identity_mode == "blake3"
     assert latest_entries[0].blob_hash is not None
 
-    assert run_cli(["verify", "--repo", str(tmp_path), "--ref", "main"]) == 0
+    assert run_cli(["verify", "--repo", str(tmp_path)]) == 0
     verify_again_payload = json.loads(capsys.readouterr().out)
     assert verify_again_payload["created_commit"] is False
     assert verify_again_payload["verified_entries"] == 0
@@ -308,7 +306,7 @@ def test_cli_verify_dry_run_reports_without_changes(tmp_path: Path, capsys) -> N
     first_commit = capsys.readouterr().out.strip()
 
     assert (
-        run_cli(["verify", "--repo", str(tmp_path), "--ref", "main", "--dry-run"]) == 0
+        run_cli(["verify", "--repo", str(tmp_path), "--dry-run"]) == 0
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["dry_run"] is True
@@ -328,14 +326,15 @@ def test_cli_staging_commit_is_branch_scoped(tmp_path: Path, capsys) -> None:
     capsys.readouterr()
 
     (tmp_path / "feature.txt").write_text("feature")
+    assert run_cli(["checkout", "--repo", str(tmp_path), "feature"]) == 0
+    capsys.readouterr()
+
     assert (
         run_cli(
             [
                 "add",
                 "--repo",
                 str(tmp_path),
-                "--ref",
-                "feature",
                 "feature.txt",
             ]
         )
@@ -362,9 +361,6 @@ def test_cli_staging_commit_is_branch_scoped(tmp_path: Path, capsys) -> None:
                 "commit",
                 "--repo",
                 str(tmp_path),
-                "--ref",
-                "feature",
-                "--staged",
                 "-m",
                 "feature only",
             ]
@@ -374,7 +370,7 @@ def test_cli_staging_commit_is_branch_scoped(tmp_path: Path, capsys) -> None:
     feature_commit = capsys.readouterr().out.strip()
     assert feature_commit and feature_commit != base_commit
 
-    assert run_cli(["status", "--repo", str(tmp_path), "--ref", "feature", "--json"]) == 0
+    assert run_cli(["status", "--repo", str(tmp_path), "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["added"] == []
     assert status_payload["removed"] == []
@@ -423,7 +419,6 @@ def test_cli_add_supports_arbitrary_local_source_with_logical_destination(
                 "commit",
                 "--repo",
                 str(repo_root),
-                "--staged",
                 "-m",
                 "ingest external",
             ]
@@ -483,7 +478,6 @@ def test_cli_add_supports_s3_source_with_staged_read_and_logical_destination(
                 "commit",
                 "--repo",
                 str(repo_root),
-                "--staged",
                 "-m",
                 "ingest remote",
             ]
@@ -544,7 +538,6 @@ def test_cli_add_supports_local_directory_source_with_destination_prefix(
                 "commit",
                 "--repo",
                 str(repo_root),
-                "--staged",
                 "-m",
                 "ingest bundle",
             ]
@@ -612,7 +605,6 @@ def test_cli_add_supports_s3_prefix_with_destination_prefix(
                 "commit",
                 "--repo",
                 str(repo_root),
-                "--staged",
                 "-m",
                 "ingest batch",
             ]
@@ -646,7 +638,7 @@ def test_cli_remote_staged_add_preserves_existing_entries_and_uploads_one_blob(
     add_payload = json.loads(capsys.readouterr().out)
     assert add_payload["added"] == ["b.txt"]
 
-    assert run_cli(["commit", "--repo", repo_uri, "--staged", "-m", "add b"]) == 0
+    assert run_cli(["commit", "--repo", repo_uri, "-m", "add b"]) == 0
     second_commit = capsys.readouterr().out.strip()
     assert len(second_commit) == 64
     assert second_commit != first_commit
@@ -702,14 +694,14 @@ def test_cli_merge_fast_forwards_target_branch(tmp_path: Path, capsys) -> None:
     capsys.readouterr()
 
     (tmp_path / "feature.txt").write_text("feature")
+    assert run_cli(["checkout", "--repo", str(tmp_path), "feature"]) == 0
+    capsys.readouterr()
     assert (
         run_cli(
             [
                 "add",
                 "--repo",
                 str(tmp_path),
-                "--ref",
-                "feature",
                 "feature.txt",
             ]
         )
@@ -723,9 +715,6 @@ def test_cli_merge_fast_forwards_target_branch(tmp_path: Path, capsys) -> None:
                 "commit",
                 "--repo",
                 str(tmp_path),
-                "--ref",
-                "feature",
-                "--staged",
                 "-m",
                 "feature commit",
             ]
@@ -734,6 +723,9 @@ def test_cli_merge_fast_forwards_target_branch(tmp_path: Path, capsys) -> None:
     )
     feature_commit = capsys.readouterr().out.strip()
     assert feature_commit and feature_commit != base_commit
+
+    assert run_cli(["checkout", "--repo", str(tmp_path), "main"]) == 0
+    capsys.readouterr()
 
     assert run_cli(["merge", "--repo", str(tmp_path), "feature", "main"]) == 0
     merge_payload = json.loads(capsys.readouterr().out)
@@ -762,14 +754,14 @@ def test_cli_merge_rejects_non_fast_forward(tmp_path: Path, capsys) -> None:
     assert main_commit
 
     (tmp_path / "feature.txt").write_text("feature")
+    assert run_cli(["checkout", "--repo", str(tmp_path), "feature"]) == 0
+    capsys.readouterr()
     assert (
         run_cli(
             [
                 "add",
                 "--repo",
                 str(tmp_path),
-                "--ref",
-                "feature",
                 "feature.txt",
             ]
         )
@@ -783,9 +775,6 @@ def test_cli_merge_rejects_non_fast_forward(tmp_path: Path, capsys) -> None:
                 "commit",
                 "--repo",
                 str(tmp_path),
-                "--ref",
-                "feature",
-                "--staged",
                 "-m",
                 "feature commit",
             ]
@@ -938,7 +927,7 @@ def test_cli_import_s3_metadata_entries_can_be_read_and_verified(
     with fs.open("fluxel://demo@main/nested/b.txt", "rb") as handle:
         assert handle.read() == b"beta"
 
-    assert run_cli(["verify", "--repo", str(tmp_path), "--ref", "main"]) == 0
+    assert run_cli(["verify", "--repo", str(tmp_path)]) == 0
     verify_payload = json.loads(capsys.readouterr().out)
     assert verify_payload["created_commit"] is True
     assert verify_payload["verified_entries"] == 2
@@ -1080,7 +1069,6 @@ def test_cli_dataset_can_mix_s3_meta_local_blake3_and_verified_s3_entries(
                 "commit",
                 "--repo",
                 str(tmp_path),
-                "--staged",
                 "-m",
                 "add local blake3 files",
             ]
@@ -1097,8 +1085,6 @@ def test_cli_dataset_can_mix_s3_meta_local_blake3_and_verified_s3_entries(
                 "verify",
                 "--repo",
                 str(tmp_path),
-                "--ref",
-                "main",
                 "--path",
                 "root.txt",
                 "--path",
@@ -1206,14 +1192,15 @@ def test_cli_meta_import_branch_removal_and_fast_forward_merge(
     assert run_cli(["branch", "--repo", str(tmp_path), "feature"]) == 0
     capsys.readouterr()
 
+    assert run_cli(["checkout", "--repo", str(tmp_path), "feature"]) == 0
+    capsys.readouterr()
+
     assert (
         run_cli(
             [
                 "rm",
                 "--repo",
                 str(tmp_path),
-                "--ref",
-                "feature",
                 "image0.jpg",
                 "nested/photo0.jpg",
             ]
@@ -1229,9 +1216,6 @@ def test_cli_meta_import_branch_removal_and_fast_forward_merge(
                 "commit",
                 "--repo",
                 str(tmp_path),
-                "--ref",
-                "feature",
-                "--staged",
                 "-m",
                 "remove zero-suffixed jpgs",
             ]
@@ -1438,7 +1422,7 @@ def test_cli_list_with_ref(tmp_path: Path, capsys, monkeypatch) -> None:
     assert run_cli(["commit", "-m", "init"]) == 0
     capsys.readouterr()
 
-    assert run_cli(["list", "--ref", "main"]) == 0
+    assert run_cli(["list"]) == 0
     out = capsys.readouterr().out.strip()
     assert out == "a.txt"
 

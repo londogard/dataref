@@ -710,8 +710,9 @@ def test_merge_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
     repo.branch("feature")
 
     (tmp_path / "feature.txt").write_text("feature")
-    repo.add(["feature.txt"], ref="feature")
-    feature_commit = repo.commit("feature commit", staged=True, ref="feature")
+    repo.set_current_branch("feature")
+    repo.add(["feature.txt"])
+    feature_commit = repo.commit("feature commit")
     assert feature_commit != base_commit
 
     store.conflict_next_ref_update = True

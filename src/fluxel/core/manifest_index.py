@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Callable, Iterator
 
-from .manifest import manifest_entry_path
+from .manifest import ManifestEntry
 
 
 DEFAULT_INDEX_BLOCK_ENTRY_COUNT = 4096
@@ -47,7 +47,7 @@ def build_manifest_index(
             stripped = raw_line.strip()
             if stripped:
                 entry_json = stripped.decode("utf-8")
-                path = manifest_entry_path(entry_json)
+                path = ManifestEntry.path_from_payload(entry_json)
                 if previous_path is not None and path <= previous_path:
                     raise ValueError(
                         "Manifest entries must be sorted by path to build an index"
@@ -195,4 +195,4 @@ def _iter_block_entries(
         if not stripped:
             continue
         entry_json = stripped.decode("utf-8")
-        yield entry_json, manifest_entry_path(entry_json)
+        yield entry_json, ManifestEntry.path_from_payload(entry_json)

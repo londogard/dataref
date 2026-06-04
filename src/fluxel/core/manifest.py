@@ -98,6 +98,49 @@ class ManifestEntry:
         elif self.blob_hash is not None and self.blob_hash != self.hash:
             raise ValueError("Blob-backed manifest entries must keep blob_hash aligned")
 
+    def serialize(self) -> str:
+        if self.identity_mode == "blake3":
+            payload: list[object] = [
+                _BLOB_BACKED_MANIFEST_TAG,
+                self.path,
+                self.hash,
+                self.size,
+                self.mtime_ns,
+            ]
+        elif self.identity_mode == "meta":
+            payload = [
+                _META_ONLY_MANIFEST_TAG,
+                self.path,
+                self.hash,
+                self.size,
+                self.mtime_ns,
+                self.source_uri,
+            ]
+        else:
+            supported_modes = ", ".join(sorted(SUPPORTED_IDENTITY_MODES))
+            raise ValueError(
+                f"Manifest entry identity_mode must be one of: {supported_modes}"
+            )
+        return json.dumps(payload, separators=(",", ":"))
+
+    @staticmethod
+    def deserialize(payload_text: str) -> "ManifestEntry":
+        try:
+            payload = _load_manifest_payload(payload_text)
+        except JSONDecodeError as error:
+            raise ValueError("Corrupt manifest entry payload") from error
+        return _manifest_entry_from_payload(payload)
+
+    @staticmethod
+    def path_from_payload(payload_text: str) -> str:
+        try:
+            payload = _load_manifest_payload(payload_text)
+        except JSONDecodeError as error:
+            raise ValueError("Corrupt manifest entry payload") from error
+        if not isinstance(payload, list) or len(payload) < 2:
+            raise ValueError("Manifest entry payload must be a JSON array")
+        return str(payload[1])
+
     @staticmethod
     def from_dict(data: dict[str, object]) -> "ManifestEntry":
         if not isinstance(data, dict):
@@ -140,48 +183,43 @@ class ManifestEntry:
 
 
 def serialize_manifest_entry(entry: ManifestEntry) -> str:
-    if entry.identity_mode == "blake3":
-        payload: list[object] = [
-            _BLOB_BACKED_MANIFEST_TAG,
-            entry.path,
-            entry.hash,
-            entry.size,
-            entry.mtime_ns,
-        ]
-    elif entry.identity_mode == "meta":
-        payload = [
-            _META_ONLY_MANIFEST_TAG,
-            entry.path,
-            entry.hash,
-            entry.size,
-            entry.mtime_ns,
-            entry.source_uri,
-        ]
-    else:
-        supported_modes = ", ".join(sorted(SUPPORTED_IDENTITY_MODES))
-        raise ValueError(
-            f"Manifest entry identity_mode must be one of: {supported_modes}"
+        if not isinstance(data, dict):
+            raise ValueError("Manifest entry payload must be an object")
+        hash_value = str(data.get("hash") or data.get("identity_value") or "")
+        if not hash_value:
+            raise ValueError("Manifest entry must include hash or identity_value")
+        identity_mode = str(data.get("identity_mode") or "blake3")
+        identity_value = data.get("identity_value")
+        blob_hash = data.get("blob_hash")
+        if blob_hash is None and "blob_hash" not in data and identity_mode == "blake3":
+            blob_hash = hash_value
+        source_uri = data.get("source_uri")
+
+        try:
+            path = str(data["path"])
+            size = int(data["size"])
+            mtime_ns = int(data["mtime_ns"])
+        except KeyError as error:
+            raise ValueError(
+                f"Manifest entry is missing required field: {error.args[0]}"
+            ) from error
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "Manifest entry size and mtime_ns must be integers"
+            ) from error
+
+        return ManifestEntry(
+            path=path,
+            hash=hash_value,
+            size=size,
+            mtime_ns=mtime_ns,
+            identity_mode=identity_mode,
+            identity_value=(
+                str(identity_value) if identity_value is not None else hash_value
+            ),
+            blob_hash=str(blob_hash) if blob_hash is not None else None,
+            source_uri=str(source_uri) if source_uri is not None else None,
         )
-    return json.dumps(payload, separators=(",", ":"))
-
-
-def deserialize_manifest_entry(payload_text: str) -> ManifestEntry:
-    try:
-        payload = _load_manifest_payload(payload_text)
-    except JSONDecodeError as error:
-        raise ValueError("Corrupt manifest entry payload") from error
-
-    return _manifest_entry_from_payload(payload)
-
-
-def manifest_entry_path(payload_text: str) -> str:
-    try:
-        payload = _load_manifest_payload(payload_text)
-    except JSONDecodeError as error:
-        raise ValueError("Corrupt manifest entry payload") from error
-    if not isinstance(payload, list) or len(payload) < 2:
-        raise ValueError("Manifest entry payload must be a JSON array")
-    return str(payload[1])
 
 
 def _load_manifest_payload(payload_text: str) -> object:
@@ -251,7 +289,7 @@ class ManifestWriter:
                     if self.block_entry_count > 0:
                         path = _manifest_entry_path_for_index(entry)
                 else:
-                    line = serialize_manifest_entry(entry).encode("utf-8")
+                    line = entry.serialize().encode("utf-8")
                     path = entry.path
 
                 if self.block_entry_count > 0:

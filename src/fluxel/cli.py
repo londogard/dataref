@@ -64,16 +64,6 @@ class CommitArgs:
         alias="--repo",
         help="Repository path or URI",
     )
-    staged: bool = flag(
-        False,
-        help="Commit only staged changes for a branch",
-    )
-    ref: str | None = None  # Branch ref to update (defaults to current branch)
-    transfer_backend: str | None = field(
-        default=None,
-        alias="--transfer-backend",
-        help="Blob transfer backend (boto3 or s5cmd)",
-    )
 
 
 @dataclass
@@ -96,12 +86,6 @@ class ImportArgs:
         alias="--repo",
         help="Repository path or URI",
     )
-    ref: str | None = None  # Branch ref to update (defaults to current branch)
-    transfer_backend: str | None = field(
-        default=None,
-        alias="--transfer-backend",
-        help="Blob transfer backend (boto3 or s5cmd)",
-    )
 
 
 @dataclass
@@ -120,15 +104,6 @@ class AddArgs:
         alias="--repo",
         help="Repository path or URI",
     )
-    ref: str | None = field(
-        default=None,
-        help="Branch ref for staging (defaults to current branch)",
-    )
-    transfer_backend: str | None = field(
-        default=None,
-        alias="--transfer-backend",
-        help="Blob transfer backend (boto3 or s5cmd)",
-    )
 
 
 @dataclass
@@ -143,10 +118,6 @@ class RmArgs:
         default=".",
         alias="--repo",
         help="Repository path or URI",
-    )
-    ref: str | None = field(
-        default=None,
-        help="Branch ref for staging (defaults to current branch)",
     )
 
 
@@ -167,10 +138,6 @@ class MoveArgs:
         alias="--repo",
         help="Repository path or URI",
     )
-    ref: str | None = field(
-        default=None,
-        help="Branch ref for staging (defaults to current branch)",
-    )
 
 
 @dataclass
@@ -179,10 +146,6 @@ class StatusArgs:
         default=".",
         alias="--repo",
         help="Repository path or URI",
-    )
-    ref: str | None = field(
-        default=None,
-        help="Branch ref for staging (defaults to current branch)",
     )
     json: bool = flag(
         False,
@@ -225,10 +188,6 @@ class ListArgs:
         default=".",
         alias="--repo",
         help="Repository path or URI",
-    )
-    ref: str | None = field(
-        default=None,
-        help="Ref (branch/commit) to list (defaults to current branch)",
     )
     path: str = field(
         default="",
@@ -414,7 +373,6 @@ class VerifyArgs:
         alias="--repo",
         help="Repository path or URI",
     )
-    ref: str = "main"  # Branch ref to verify
     path: list[str] = field(
         default_factory=list,
         alias="--path",
@@ -425,11 +383,6 @@ class VerifyArgs:
         False,
         alias="--dry-run",
         help="Report entries that would be verified without writing blobs or commits",
-    )
-    transfer_backend: str | None = field(
-        default=None,
-        alias="--transfer-backend",
-        help="Blob transfer backend (boto3 or s5cmd)",
     )
 
 
@@ -590,6 +543,8 @@ def _config_get_value(config: FluxelConfig, key: str) -> object | None:
         return config.dataset_root
     if key == "default_branch":
         return config.default_branch
+    if key == "transfer_backend":
+        return config.transfer_backend
     if key == "s3.bucket":
         return config.bucket if isinstance(config, S3Config) else None
     if key == "s3.prefix":
@@ -612,7 +567,9 @@ def _config_set_value(config: FluxelConfig, key: str, value: str) -> FluxelConfi
                     bucket=bucket,
                 )
             except ValueError:
-                raise ValueError("Cannot switch to S3 backend without a bucket. Set s3.bucket first.")
+                raise ValueError(
+                    "Cannot switch to S3 backend without a bucket. Set s3.bucket first."
+                )
         return LocalConfig(
             dataset_root=config.dataset_root,
             default_branch=config.default_branch,
@@ -621,6 +578,8 @@ def _config_set_value(config: FluxelConfig, key: str, value: str) -> FluxelConfi
         config.dataset_root = value
     elif key == "default_branch":
         config.default_branch = value
+    elif key == "transfer_backend":
+        config.transfer_backend = value if value else None
     elif key == "s3.bucket":
         if isinstance(config, LocalConfig):
             return S3Config(
@@ -703,9 +662,6 @@ def run_cli(argv: list[str] | None = None) -> int:
                 command.root,
                 command.message,
                 identity_mode=command.identity,
-                staged=command.staged,
-                ref=command.ref,
-                blob_transfer=command.transfer_backend,
             )
             print(commit_id)
             return 0
@@ -717,8 +673,6 @@ def run_cli(argv: list[str] | None = None) -> int:
                 command.message,
                 identity_mode=command.identity,
                 path_patterns=_flatten_option_values(command.path_patterns),
-                ref=command.ref,
-                blob_transfer=command.transfer_backend,
             )
             print(commit_id)
             return 0
@@ -727,10 +681,8 @@ def run_cli(argv: list[str] | None = None) -> int:
             stage = add(
                 root=command.root,
                 paths=command.paths,
-                ref=command.ref,
                 identity_mode=command.identity,
                 destination_path=command.destination_path,
-                blob_transfer=command.transfer_backend,
             )
             print(json.dumps(_stage_payload(stage), indent=2))
             return 0
@@ -741,7 +693,6 @@ def run_cli(argv: list[str] | None = None) -> int:
                     root=command.root,
                     paths=command.paths,
                     message=command.message,
-                    ref=command.ref,
                 )
                 print(
                     json.dumps(
@@ -754,7 +705,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 0
-            stage = rm(root=command.root, paths=command.paths, ref=command.ref)
+            stage = rm(root=command.root, paths=command.paths)
             print(json.dumps(_stage_payload(stage), indent=2))
             return 0
 
@@ -765,7 +716,6 @@ def run_cli(argv: list[str] | None = None) -> int:
                     source_path=command.source_path,
                     destination_path=command.destination_path,
                     message=command.message,
-                    ref=command.ref,
                 )
                 print(
                     json.dumps(
@@ -784,7 +734,6 @@ def run_cli(argv: list[str] | None = None) -> int:
                 root=command.root,
                 source_path=command.source_path,
                 destination_path=command.destination_path,
-                ref=command.ref,
             )
             print(json.dumps(_stage_payload(stage), indent=2))
             return 0
@@ -792,7 +741,6 @@ def run_cli(argv: list[str] | None = None) -> int:
         if isinstance(command, StatusArgs):
             stage = status(
                 root=command.root,
-                ref=command.ref,
             )
             if command.json:
                 print(json.dumps(_stage_payload(stage), indent=2))
@@ -851,10 +799,8 @@ def run_cli(argv: list[str] | None = None) -> int:
         if isinstance(command, VerifyArgs):
             result = verify(
                 root=command.root,
-                ref=command.ref,
                 path_prefixes=_flatten_option_values(command.path),
                 dry_run=command.dry_run,
-                blob_transfer=command.transfer_backend,
             )
             payload = {
                 "commit_id": result.commit_id,
@@ -872,7 +818,6 @@ def run_cli(argv: list[str] | None = None) -> int:
             if isinstance(index_command, IndexBuildArgs):
                 paths = build_analytical_index(
                     root=index_command.root,
-                    ref=index_command.ref,
                     output_dir=index_command.output_dir,
                     export_parquet=index_command.parquet,
                 )
@@ -934,9 +879,8 @@ def run_cli(argv: list[str] | None = None) -> int:
 
         if isinstance(command, ListArgs):
             repo = open_repository(command.root)
-            ref = command.ref or repo.current_branch()
             entries = repo.resolve_entries_for_prefix(
-                ref,
+                repo.current_branch(),
                 command.path,
             )
             if command.json:
@@ -1046,7 +990,6 @@ def run_cli(argv: list[str] | None = None) -> int:
         if isinstance(command, TransferArgs):
             commands = generate_transfer_commands(
                 command.root,
-                ref=command.ref,
                 mode=command.mode,
                 include_metadata=command.include_metadata,
             )

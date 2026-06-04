@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 from tempfile import NamedTemporaryFile
 from typing import BinaryIO, Iterator, Literal
 
+import msgspec
 from blake3 import blake3
 
 from .client_state import LocalClientState
@@ -104,32 +105,13 @@ class MoveResult:
     moved_paths: list[str]
 
 
-@dataclass(frozen=True)
-class StageChange:
+class StageChange(msgspec.Struct):
     path: str
     action: str
     identity_mode: str | None = None
     source_uri: str | None = None
     blob_hash: str | None = None
     size: int | None = None
-
-    @staticmethod
-    def from_dict(data: dict[str, object]) -> "StageChange":
-        action = str(data["action"])
-        identity_mode_raw = data.get("identity_mode")
-        source_uri_raw = data.get("source_uri")
-        blob_hash_raw = data.get("blob_hash")
-        size_raw = data.get("size")
-        return StageChange(
-            path=str(data["path"]),
-            action=action,
-            identity_mode=(
-                str(identity_mode_raw) if identity_mode_raw is not None else None
-            ),
-            source_uri=str(source_uri_raw) if source_uri_raw is not None else None,
-            blob_hash=str(blob_hash_raw) if blob_hash_raw is not None else None,
-            size=int(size_raw) if size_raw is not None else None,
-        )
 
 
 @dataclass(frozen=True)
@@ -310,31 +292,58 @@ class FluxelRepository:
         self,
         message: str,
         identity_mode: Literal["blake3", "meta"] = "blake3",
-        *,
-        staged: bool = False,
-        ref: str | None = None,
     ) -> str:
         if not message.strip():
             raise ValueError("Commit message cannot be empty")
         if identity_mode not in {"blake3", "meta"}:
             raise ValueError("identity_mode must be one of: blake3, meta")
-        branch = ref or self.current_branch()
-        branch_state = self._require_branch_state(branch)
 
-        if staged:
-            return self._commit_staged(
-                message=message,
-                branch_state=branch_state,
+        branch = self.current_branch()
+        self._ensure_branch_exists(branch)
+        branch_state = self._require_branch_state(branch)
+        parent_commit = branch_state.commit_id
+
+        staged = self._load_stage(branch)
+        staged_removed_paths: set[str] = {
+            p for p, c in staged.items() if c.action == "remove"
+        }
+        staged_additions: dict[str, StageChange] = {
+            p: c for p, c in staged.items() if c.action == "add"
+        }
+
+        parent_manifest_entries: Iterator[ManifestEntry] | None = None
+        if parent_commit:
+            parent = self.read_commit(parent_commit)
+            parent_manifest_entries = self.store.iter_manifest_entries(parent.manifest)
+
+        if staged_additions:
+            staged_entries = sorted(
+                (self._entry_from_stage_change(
+                    c, c.identity_mode or identity_mode, store_blob=True,
+                ) for c in staged_additions.values()),
+                key=lambda e: e.path,
             )
+            if parent_manifest_entries:
+                parent_stream: Iterator[ManifestEntry] | None = _merge_sorted_entry_streams(
+                    base_entries=parent_manifest_entries,
+                    new_entries=iter(staged_entries),
+                )
+            else:
+                parent_stream = iter(staged_entries)
+        else:
+            parent_stream = parent_manifest_entries
 
         temp_manifest = self._write_temp_manifest(
-            self._materialize_blobs_and_entries(identity_mode=identity_mode)
+            self._iter_commit_entries(
+                parent_stream=parent_stream,
+                staged_removed_paths=staged_removed_paths,
+                identity_mode=identity_mode,
+            )
         )
         manifest_hash = blake3_digest_file(temp_manifest)
         self._persist_manifest(temp_manifest, manifest_hash)
 
-        parent_commit = branch_state.commit_id
-        return self._write_commit_object(
+        commit_id = self._write_commit_object(
             branch=branch,
             message=message,
             parent_commit=parent_commit,
@@ -342,6 +351,85 @@ class FluxelRepository:
             expected_version_token=branch_state.version_token,
             operation="commit",
         )
+
+        self._save_stage(branch, {})
+        return commit_id
+
+    def _entry_from_file_entry(
+        self, file_entry: FileEntry, identity_mode: str, *, store_blob: bool
+    ) -> ManifestEntry:
+        relative_path = file_entry.relative_path
+        if identity_mode == "blake3":
+            identity_value = blake3_digest_file(file_entry.path)
+            blob_hash = identity_value
+            if store_blob:
+                self._store_blob(file_entry.path, blob_hash)
+            else:
+                blob_hash = None
+        else:
+            identity_value = metadata_identity(relative_path, file_entry.size)
+            blob_hash = None
+        return ManifestEntry(
+            path=relative_path,
+            hash=identity_value,
+            size=file_entry.size,
+            mtime_ns=file_entry.mtime_ns,
+            identity_mode=identity_mode,
+            identity_value=identity_value,
+            blob_hash=blob_hash,
+            source_uri=file_entry.path.as_uri(),
+        )
+
+    def _iter_commit_entries(
+        self,
+        *,
+        parent_stream: Iterator[ManifestEntry] | None,
+        staged_removed_paths: set[str],
+        identity_mode: str,
+    ) -> Iterator[ManifestEntry]:
+        worktree_iter = walk_files(self.root)
+
+        wf: FileEntry | None = next(worktree_iter, None)
+        pe: ManifestEntry | None = next(parent_stream, None) if parent_stream else None
+
+        while wf is not None or pe is not None:
+            wf_path = wf.relative_path if wf else None
+            pe_path = pe.path if pe else None
+
+            # Parent entry is staged for removal — skip it
+            if pe is not None and _path_is_removed(pe_path, staged_removed_paths):
+                pe = next(parent_stream, None)
+                continue
+
+            if pe is None:
+                yield self._entry_from_file_entry(wf, identity_mode, store_blob=True)
+                wf = next(worktree_iter, None)
+            elif wf is None:
+                yield pe
+                pe = next(parent_stream, None)
+            elif wf_path == pe_path:
+                if self._entry_is_modified(wf, pe, identity_mode):
+                    yield self._entry_from_file_entry(wf, identity_mode, store_blob=True)
+                else:
+                    yield pe
+                wf = next(worktree_iter, None)
+                pe = next(parent_stream, None)
+            elif wf_path < pe_path:
+                yield self._entry_from_file_entry(wf, identity_mode, store_blob=True)
+                wf = next(worktree_iter, None)
+            else:
+                yield pe
+                pe = next(parent_stream, None)
+
+    def _entry_is_modified(
+        self, file_entry: FileEntry, manifest_entry: ManifestEntry, identity_mode: str
+    ) -> bool:
+        if file_entry.size != manifest_entry.size:
+            return True
+        if identity_mode == "blake3":
+            current_hash = blake3_digest_file(file_entry.path)
+            return current_hash != manifest_entry.hash
+        return False
 
     def import_s3(
         self,
@@ -735,11 +823,13 @@ class FluxelRepository:
 
     def verify(
         self,
-        ref: str = "main",
+        ref: str | None = None,
         path_prefixes: list[str] | None = None,
         *,
         dry_run: bool = False,
     ) -> VerifyResult:
+        if ref is None:
+            ref = self.current_branch()
         branch_state = self._require_branch_state(ref)
 
         base_commit_id = self.resolve_ref(ref)
@@ -920,25 +1010,6 @@ class FluxelRepository:
             normalized_path,
             manifest_index=commit.manifest_index,
         )
-
-    def _materialize_blobs_and_entries(
-        self, *, identity_mode: str
-    ) -> Iterator[tuple[str, str]]:
-        for entry in walk_files(self.root):
-            relative_path = entry.relative_path
-            if identity_mode == "blake3":
-                identity_value = blake3_digest_file(entry.path)
-                self._store_blob(entry.path, identity_value)
-                yield relative_path, json.dumps(
-                    ["b", relative_path, identity_value, entry.size, entry.mtime_ns],
-                    separators=(",", ":"),
-                )
-            else:
-                identity_value = metadata_identity(relative_path, entry.size)
-                yield relative_path, json.dumps(
-                    ["m", relative_path, identity_value, entry.size, entry.mtime_ns, entry.path.as_uri()],
-                    separators=(",", ":"),
-                )
 
     def _materialize_s3_entries(
         self,
@@ -1224,28 +1295,24 @@ class FluxelRepository:
         stage_payload = self.client_state.read_staging_payload(branch)
         if stage_payload is None:
             return {}
-        raw = json.loads(stage_payload)
-        if not isinstance(raw, list):
-            raise ValueError("Stage file must contain a list")
-        staged: dict[str, StageChange] = {}
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            change = StageChange.from_dict(item)
-            staged[change.path] = change
-        return staged
+        changes: list[StageChange] = msgspec.json.decode(
+            stage_payload, type=list[StageChange]
+        )
+        return {change.path: change for change in changes}
 
     def _save_stage(self, branch: str, staged: dict[str, StageChange]) -> None:
         if not staged:
             self.client_state.write_staging_payload(branch, None)
             return
-        payload = [
-            _stage_change_dict(change)
-            for change in sorted(staged.values(), key=lambda item: item.path)
-        ]
+        payload = msgspec.json.format(
+            msgspec.json.encode(
+                sorted(staged.values(), key=lambda item: item.path)
+            ),
+            indent=2,
+        )
         self.client_state.write_staging_payload(
             branch,
-            json.dumps(payload, indent=2) + "\n",
+            payload.decode() + "\n",
         )
 
     def _ensure_branch_exists(self, branch: str) -> None:
@@ -1339,60 +1406,6 @@ class FluxelRepository:
             expected_commit_id=parent_commit,
             operation=operation,
         )
-        return commit_id
-
-    def _commit_staged(self, *, message: str, branch_state: BranchRefState) -> str:
-        staged = self._load_stage(branch_state.branch)
-        if not staged:
-            raise ValueError(f"No staged changes for branch: {branch_state.branch}")
-
-        parent_commit = branch_state.commit_id
-
-        removed_paths: set[str] = set()
-        added_entries: list[ManifestEntry] = []
-        for change in staged.values():
-            if change.action == "remove":
-                removed_paths.add(change.path)
-            elif change.action == "add":
-                added_entries.append(
-                    self._entry_from_stage_change(
-                        change,
-                        change.identity_mode or "blake3",
-                        store_blob=True,
-                    )
-                )
-            else:
-                raise ValueError(f"Unknown stage action: {change.action}")
-        added_entries.sort(key=lambda e: e.path)
-
-        parent_manifest: str | None = None
-        if parent_commit:
-            parent = self.read_commit(parent_commit)
-            parent_manifest = parent.manifest
-
-        temp_manifest = self._write_temp_manifest(
-            _merge_sorted_entry_streams(
-                base_entries=(
-                    self.store.iter_manifest_entries(parent_manifest)
-                    if parent_manifest
-                    else None
-                ),
-                new_entries=iter(added_entries),
-                removed_paths=removed_paths,
-            )
-        )
-        manifest_hash = blake3_digest_file(temp_manifest)
-        self._persist_manifest(temp_manifest, manifest_hash)
-
-        commit_id = self._write_commit_object(
-            branch=branch_state.branch,
-            message=message,
-            parent_commit=parent_commit,
-            manifest_hash=manifest_hash,
-            expected_version_token=branch_state.version_token,
-            operation="commit",
-        )
-        self._save_stage(branch_state.branch, {})
         return commit_id
 
     def _store_blob(self, source_file: Path, content_hash: str) -> None:
@@ -1619,22 +1632,6 @@ def _default_remote_client_root(worktree_root: Path, repo_uri: str) -> Path:
     return worktree_root / ".fluxel" / "clients" / repo_id
 
 
-def _stage_change_dict(change: StageChange) -> dict[str, object]:
-    d: dict[str, object] = {
-        "path": change.path,
-        "action": change.action,
-    }
-    if change.identity_mode is not None:
-        d["identity_mode"] = change.identity_mode
-    if change.source_uri is not None:
-        d["source_uri"] = change.source_uri
-    if change.blob_hash is not None:
-        d["blob_hash"] = change.blob_hash
-    if change.size is not None:
-        d["size"] = change.size
-    return d
-
-
 def _path_is_removed(path: str, removed: set[str]) -> bool:
     if path in removed:
         return True
@@ -1722,6 +1719,9 @@ def open_repository(
     repo_root = Path(root).resolve()
     config = BaseConfig.load(repo_root)
 
+    if blob_transfer is None and config is not None and config.transfer_backend:
+        blob_transfer = build_blob_transfer_backend(config.transfer_backend)
+
     if isinstance(config, S3Config):
         bucket = config.bucket
         prefix = config.prefix
@@ -1757,16 +1757,10 @@ def commit(
     root: str | Path,
     message: str,
     identity_mode: str = "blake3",
-    *,
-    staged: bool = False,
-    ref: str | None = None,
-    blob_transfer: BlobTransferBackend | str | None = None,
 ) -> str:
-    return open_repository(root, blob_transfer=blob_transfer).commit(
+    return open_repository(root).commit(
         message,
         identity_mode=identity_mode,
-        staged=staged,
-        ref=ref,
     )
 
 
@@ -1911,7 +1905,7 @@ def diff(root: str | Path, from_ref: str, to_ref: str) -> list[DiffEntry]:
 
 def verify(
     root: str | Path,
-    ref: str = "main",
+    ref: str | None = None,
     path_prefixes: list[str] | None = None,
     *,
     dry_run: bool = False,

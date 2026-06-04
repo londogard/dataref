@@ -61,7 +61,7 @@ def test_s3_integration_branch_commit_and_fast_forward_merge(
     )
     repo_feature.set_current_branch("feature")
     repo_feature.add(["feature.txt"])
-    feature_commit = repo_feature.commit("feature commit", staged=True)
+    feature_commit = repo_feature.commit("feature commit")
 
     merge_result = repo_main.merge("feature", "main")
     assert merge_result.updated is True

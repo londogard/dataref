@@ -17,6 +17,7 @@ class BaseConfig(msgspec.Struct, tag_field="backend"):
     format_version: int = CURRENT_FORMAT_VERSION
     dataset_root: str = "."
     default_branch: str = "main"
+    transfer_backend: str | None = None
 
     def __post_init__(self) -> None:
         if self.format_version not in SUPPORTED_FORMAT_VERSIONS:

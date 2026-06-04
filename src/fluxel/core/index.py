@@ -18,12 +18,14 @@ class AnalyticalIndexPaths:
 
 def build_analytical_index(
     root: str | Path,
-    ref: str = "main",
+    ref: str | None = None,
     *,
     output_dir: str | Path | None = None,
     export_parquet: bool = False,
 ) -> AnalyticalIndexPaths:
     repo = open_repository(root)
+    if ref is None:
+        ref = repo.current_branch()
     commit_id = repo.resolve_ref(ref)
     commit = repo.read_commit(commit_id)
 
