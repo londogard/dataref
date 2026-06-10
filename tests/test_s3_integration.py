@@ -8,7 +8,6 @@ import pytest
 
 from fluxel.core import FluxelRepository, RefConflictError, open_repository
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -258,8 +257,17 @@ def test_s3_integration_million_file_scale(
         client_root=client_root,
         s3_client=ministack_client,
     )
+    # Use metadata identity for performance (no content hashing on 1M empty files)
+    from fluxel.core.config import S3Config
+    from fluxel.core.storage import parse_s3_uri
+
+    bucket, prefix = parse_s3_uri(s3_repo_root)
+    cfg = S3Config(
+        dataset_root=str(worktree), bucket=bucket, prefix=prefix, identity="meta"
+    )
+    cfg.save(worktree)
     commit_start = time.perf_counter()
-    commit_id = repo.commit("1M file snapshot (meta)", identity_mode="meta")
+    commit_id = repo.commit("1M file snapshot")
     commit_time = time.perf_counter() - commit_start
     assert commit_id
     print(

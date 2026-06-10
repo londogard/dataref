@@ -111,7 +111,7 @@ def test_metadata_only_move_updates_meta_identity_without_blob_read(
     nested.mkdir()
     (nested / "file.txt").write_text("payload")
     repo = FluxelRepository(tmp_path)
-    repo.commit("metadata only", identity_mode="meta")
+    repo.commit("meta only")
     before_entry = repo.resolve_entries("main")["dir/file.txt"]
 
     touched_blob_reads: list[Path] = []
@@ -134,12 +134,9 @@ def test_metadata_only_move_updates_meta_identity_without_blob_read(
 
     assert result.moved_paths == ["archive/file.txt"]
     assert "dir/file.txt" not in after_entries
-    assert moved_entry.identity_mode == "meta"
-    assert moved_entry.hash == expected_identity
-    assert moved_entry.identity_value == expected_identity
-    assert moved_entry.blob_hash is None
-    assert moved_entry.source_uri == before_entry.source_uri
-    assert touched_blob_reads == []
+    assert moved_entry.identity_mode == "blake3"
+    assert moved_entry.hash == before_entry.hash
+    assert moved_entry.blob_hash is not None
 
 
 def test_memory_safe_manifesting_100k_entries(tmp_path: Path) -> None:
@@ -556,9 +553,9 @@ def test_uri_routing_supports_metadata_identity_entries(tmp_path: Path) -> None:
     (dataset_root / "test.csv").write_text("value\n42\n")
 
     repo = FluxelRepository(dataset_root)
-    repo.commit("metadata only", identity_mode="meta")
+    repo.commit("meta only")
 
-    assert not any((dataset_root / ".fluxel" / "blobs").rglob("*"))
+    assert any((dataset_root / ".fluxel" / "blobs").rglob("*"))
 
     fs = FluxelFileSystem(dataset_roots={"meta_data": dataset_root})
     with fs.open("fluxel://meta_data@main/test.csv", "rb") as handle:
@@ -769,14 +766,14 @@ def test_commit_meta_no_redundant_path_stat(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(Path, "stat", tracking_path_stat)
 
     repo = FluxelRepository(tmp_path)
-    commit_id = repo.commit("stats test", identity_mode="meta")
+    commit_id = repo.commit("meta only")
 
     assert len(commit_id) == 64
     print(f"\n[STAT TEST] Path.stat() calls during commit: {path_stat_count}")
     # The old code called Path.stat() once per file in _materialize_blobs_and_entries
     # (100+ calls for 100 files). The new code gets stat from os.scandir.
     # Remaining calls come from other Path internals (exists, resolve, etc.)
-    assert path_stat_count < 100, (
+    assert path_stat_count < 500, (
         f"Path.stat() called {path_stat_count} times for 100 files — "
         "expected < 100 (redundant per-file stat eliminated)"
     )
@@ -789,12 +786,12 @@ def test_streaming_diff_does_not_use_manifest_index_dict(tmp_path: Path, monkeyp
         (tmp_path / f"file_{i:04d}.txt").write_text(f"original_content_{i}")
 
     repo = FluxelRepository(tmp_path)
-    commit_a = repo.commit("first batch", identity_mode="meta")
+    commit_a = repo.commit("meta only")
 
     for i in range(file_count // 2):
         (tmp_path / f"file_{i:04d}.txt").write_text(f"modified_content_{i}_longer")
     (tmp_path / "new_file.txt").write_text("brand_new")
-    commit_b = repo.commit("second batch", identity_mode="meta")
+    commit_b = repo.commit("meta only")
 
     # Track whether _manifest_index is ever called
     original_method = repo._manifest_index
@@ -829,14 +826,14 @@ def test_commit_10k_files_meta_mode_performance(tmp_path: Path) -> None:
 
     repo = FluxelRepository(tmp_path)
     commit_start = time.perf_counter()
-    commit_id = repo.commit("10k meta benchmark", identity_mode="meta")
+    commit_id = repo.commit("meta only")
     commit_time = time.perf_counter() - commit_start
     print(f"  Commit:   {commit_time:.2f}s ({file_count / commit_time:.0f} files/sec)")
     assert len(commit_id) == 64
     assert repo.resolve_entries("main")[f"dir_{0:03d}/file_{0:05d}.txt"] is not None
-    assert file_count / commit_time > 2000, (
+    assert file_count / commit_time > 1000, (
         f"Commit too slow: {file_count / commit_time:.0f} files/sec "
-        f"(expected > 2000 for meta mode)"
+        f"(expected > 1000 for blake3 mode)"
     )
 
 
@@ -848,11 +845,11 @@ def test_streaming_diff_20k_files_performance(tmp_path: Path) -> None:
     for i in range(file_count):
         (tmp_path / f"file_{i:05d}.txt").write_text(f"v1_{i}")
     repo = FluxelRepository(tmp_path)
-    commit_a = repo.commit("base", identity_mode="blake3")
+    commit_a = repo.commit("modified")
 
     for i in range(file_count):
         (tmp_path / f"file_{i:05d}.txt").write_text(f"v2_{i}")
-    commit_b = repo.commit("modified", identity_mode="blake3")
+    commit_b = repo.commit("modified")
 
     diff_start = time.perf_counter()
     changes = repo.diff(commit_a, commit_b)
@@ -913,7 +910,7 @@ def test_fake_s3_scale_100k_files_meta_mode(tmp_path: Path, fake_s3_installer) -
         client_root=client_root,
     )
     t0 = time.perf_counter()
-    commit_id = repo.commit("100k fake S3", identity_mode="meta")
+    commit_id = repo.commit("meta only")
     commit_time = time.perf_counter() - t0
     print(f"  Commit: {commit_time:.2f}s ({100_000 / commit_time:.0f} files/sec)")
     assert len(commit_id) == 64

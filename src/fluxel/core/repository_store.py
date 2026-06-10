@@ -599,12 +599,17 @@ class S3RepositoryStore(RepositoryStore):
             )
             return
         with Path(source_path).open("rb") as handle:
-            self._put_stream(
-                key=self._key("blob", blob_hash),
-                body=handle,
-                if_missing=if_missing,
-                error_message=f"Blob already exists: {blob_hash}",
-            )
+            try:
+                self._put_stream(
+                    key=self._key("blob", blob_hash),
+                    body=handle,
+                    if_missing=if_missing,
+                    error_message=f"Blob already exists: {blob_hash}",
+                )
+            except OptimisticLockError:
+                if if_missing:
+                    return
+                raise
 
     def object_exists(self, kind: RepositoryObjectKind, object_id: str) -> bool:
         if kind == "blob" and self._blob_transfer is not None:

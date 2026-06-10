@@ -18,14 +18,8 @@ from .core import (
     build_analytical_index,
     commit,
     diff,
-    drop_analytical_index,
-    generate_transfer_commands,
-    import_s3,
     merge,
     move_staged,
-    move as move_committed,
-    query_analytical_index,
-    remove,
     rm,
     status,
     verify,
@@ -56,31 +50,6 @@ HANDLED_CLI_ERRORS = (
 @dataclass
 class CommitArgs:
     message: str = field(alias=["-m", "--message"], help="Commit message")
-    identity: IdentityMode = (
-        "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
-    )
-    root: str = field(
-        default=".",
-        alias="--repo",
-        help="Repository path or URI",
-    )
-
-
-@dataclass
-class ImportArgs:
-    source: str = field(
-        positional=True, help="S3 URI to import, e.g. s3://bucket/prefix"
-    )
-    message: str = field(alias=["-m", "--message"], help="Commit message")
-    identity: IdentityMode = (
-        "blake3"  # Identity strategy: full-content blake3 or metadata hash(path+size)"
-    )
-    path_patterns: list[str] = field(
-        default_factory=list,
-        alias="--path",
-        action="append",
-        help="Optional relative path/glob filter (repeatable)",
-    )
     root: str = field(
         default=".",
         alias="--repo",
@@ -109,11 +78,6 @@ class AddArgs:
 @dataclass
 class RmArgs:
     paths: list[str] = field(positional=True, nargs="+", help="Paths to remove")
-    message: str | None = field(
-        default=None,
-        alias=["-m", "--message"],
-        help="Commit message (omit to stage removals instead of committing)",
-    )
     root: str = field(
         default=".",
         alias="--repo",
@@ -127,11 +91,6 @@ class MoveArgs:
     destination_path: str = field(
         positional=True,
         help="Destination path or prefix",
-    )
-    message: str | None = field(
-        default=None,
-        alias=["-m", "--message"],
-        help="Commit message (omit to stage the move instead of committing)",
     )
     root: str = field(
         default=".",
@@ -229,34 +188,6 @@ class CheckoutArgs:
         default=".",
         alias="--repo",
         help="Repository path or URI",
-    )
-
-
-@dataclass
-class TransferArgs:
-    root: str = field(
-        default=".",
-        alias="--repo",
-        help="Repository path",
-    )
-    ref: str | None = field(
-        default=None,
-        help="Ref (branch/commit) to transfer blobs for (default: current branch)",
-    )
-    output: str | None = field(
-        default=None,
-        alias=["-o", "--output"],
-        help="Output file path (default: stdout)",
-    )
-    mode: str = field(
-        default="upload",
-        alias="--mode",
-        help="Transfer direction: upload (local->S3) or download (S3->local)",
-    )
-    include_metadata: bool = flag(
-        False,
-        alias="--include-metadata",
-        help="Also include manifest and commit metadata files in the command list",
     )
 
 
@@ -393,7 +324,6 @@ class IndexBuildArgs:
         alias="--repo",
         help="Repository path or URI",
     )
-    ref: str = "main"  # Ref to index
     output_dir: str | None = field(
         default=None,
         alias="--output-dir",
@@ -406,23 +336,10 @@ class IndexBuildArgs:
 
 
 @dataclass
-class IndexQueryArgs:
-    db: str  # Path to DuckDB index file
-    sql: str  # SQL query to execute
-
-
-@dataclass
-class IndexDropArgs:
-    db: str  # Path to DuckDB index file
-
-
-@dataclass
 class IndexArgs:
-    command: IndexBuildArgs | IndexQueryArgs | IndexDropArgs = subparsers(
+    command: IndexBuildArgs = subparsers(
         {
             "build": IndexBuildArgs,
-            "query": IndexQueryArgs,
-            "drop": IndexDropArgs,
         }
     )
 
@@ -431,7 +348,6 @@ class IndexArgs:
 class FluxelCLI:
     command: (
         CommitArgs
-        | ImportArgs
         | AddArgs
         | RmArgs
         | MoveArgs
@@ -444,12 +360,10 @@ class FluxelCLI:
         | LogArgs
         | ListArgs
         | CheckoutArgs
-        | TransferArgs
         | ConfigArgs
     ) = subparsers(
         {
             "commit": CommitArgs,
-            "import": ImportArgs,
             "add": AddArgs,
             "rm": RmArgs,
             "mv": MoveArgs,
@@ -462,7 +376,6 @@ class FluxelCLI:
             "log": LogArgs,
             "list": ListArgs,
             "checkout": CheckoutArgs,
-            "transfer": TransferArgs,
             "config": ConfigArgs,
         }
     )
@@ -527,8 +440,6 @@ def _stage_payload(stage: object) -> dict[str, object]:
 def _flatten_option_values(values: list[object]) -> list[str]:
     flattened: list[str] = []
     for value in values:
-        # `simple_parsing` may surface repeated list-valued flags as nested lists
-        # (e.g. [['**/*.jpg'], ['root.txt']]) for this dataclass field shape.
         if isinstance(value, list):
             flattened.extend(str(item) for item in value)
             continue
@@ -543,6 +454,8 @@ def _config_get_value(config: FluxelConfig, key: str) -> object | None:
         return config.dataset_root
     if key == "default_branch":
         return config.default_branch
+    if key == "identity":
+        return config.identity
     if key == "transfer_backend":
         return config.transfer_backend
     if key == "s3.bucket":
@@ -567,9 +480,7 @@ def _config_set_value(config: FluxelConfig, key: str, value: str) -> FluxelConfi
                     bucket=bucket,
                 )
             except ValueError:
-                raise ValueError(
-                    "Cannot switch to S3 backend without a bucket. Set s3.bucket first."
-                )
+                raise ValueError("Cannot switch to S3 backend without a bucket. Set s3.bucket first.")
         return LocalConfig(
             dataset_root=config.dataset_root,
             default_branch=config.default_branch,
@@ -578,6 +489,10 @@ def _config_set_value(config: FluxelConfig, key: str, value: str) -> FluxelConfi
         config.dataset_root = value
     elif key == "default_branch":
         config.default_branch = value
+    elif key == "identity":
+        if value not in ("blake3", "meta"):
+            raise ValueError(f"identity must be 'blake3' or 'meta', got: {value}")
+        config.identity = value
     elif key == "transfer_backend":
         config.transfer_backend = value if value else None
     elif key == "s3.bucket":
@@ -604,8 +519,6 @@ def _config_set_value(config: FluxelConfig, key: str, value: str) -> FluxelConfi
 def _command_name(command: object) -> str:
     if isinstance(command, CommitArgs):
         return "commit"
-    if isinstance(command, ImportArgs):
-        return "import"
     if isinstance(command, AddArgs):
         return "add"
     if isinstance(command, RmArgs):
@@ -629,13 +542,7 @@ def _command_name(command: object) -> str:
     if isinstance(command, CheckoutArgs):
         return "checkout"
     if isinstance(command, IndexArgs):
-        if isinstance(command.command, IndexBuildArgs):
-            return "index build"
-        if isinstance(command.command, IndexQueryArgs):
-            return "index query"
-        if isinstance(command.command, IndexDropArgs):
-            return "index drop"
-        return "index"
+        return "index build"
     if isinstance(command, ConfigArgs):
         if isinstance(command.command, ConfigInitArgs):
             return "config init"
@@ -661,18 +568,6 @@ def run_cli(argv: list[str] | None = None) -> int:
             commit_id = commit(
                 command.root,
                 command.message,
-                identity_mode=command.identity,
-            )
-            print(commit_id)
-            return 0
-
-        if isinstance(command, ImportArgs):
-            commit_id = import_s3(
-                command.root,
-                command.source,
-                command.message,
-                identity_mode=command.identity,
-                path_patterns=_flatten_option_values(command.path_patterns),
             )
             print(commit_id)
             return 0
@@ -688,48 +583,11 @@ def run_cli(argv: list[str] | None = None) -> int:
             return 0
 
         if isinstance(command, RmArgs):
-            if command.message:
-                result = remove(
-                    root=command.root,
-                    paths=command.paths,
-                    message=command.message,
-                )
-                print(
-                    json.dumps(
-                        {
-                            "ref": result.ref,
-                            "commit_id": result.commit_id,
-                            "removed_paths": result.removed_paths,
-                        },
-                        indent=2,
-                    )
-                )
-                return 0
             stage = rm(root=command.root, paths=command.paths)
             print(json.dumps(_stage_payload(stage), indent=2))
             return 0
 
         if isinstance(command, MoveArgs):
-            if command.message:
-                result = move_committed(
-                    root=command.root,
-                    source_path=command.source_path,
-                    destination_path=command.destination_path,
-                    message=command.message,
-                )
-                print(
-                    json.dumps(
-                        {
-                            "ref": result.ref,
-                            "commit_id": result.commit_id,
-                            "source_path": result.source_path,
-                            "destination_path": result.destination_path,
-                            "moved_paths": result.moved_paths,
-                        },
-                        indent=2,
-                    )
-                )
-                return 0
             stage = move_staged(
                 root=command.root,
                 source_path=command.source_path,
@@ -814,35 +672,26 @@ def run_cli(argv: list[str] | None = None) -> int:
             return 0
 
         if isinstance(command, IndexArgs):
-            index_command = command.command
-            if isinstance(index_command, IndexBuildArgs):
-                paths = build_analytical_index(
-                    root=index_command.root,
-                    output_dir=index_command.output_dir,
-                    export_parquet=index_command.parquet,
+            cmd = command.command
+            paths = build_analytical_index(
+                root=cmd.root,
+                output_dir=cmd.output_dir,
+                export_parquet=cmd.parquet,
+            )
+            print(
+                json.dumps(
+                    {
+                        "database_path": str(paths.database_path),
+                        "parquet_path": (
+                            str(paths.parquet_path)
+                            if paths.parquet_path is not None
+                            else None
+                        ),
+                    },
+                    indent=2,
                 )
-                print(
-                    json.dumps(
-                        {
-                            "database_path": str(paths.database_path),
-                            "parquet_path": (
-                                str(paths.parquet_path)
-                                if paths.parquet_path is not None
-                                else None
-                            ),
-                        },
-                        indent=2,
-                    )
-                )
-                return 0
-            if isinstance(index_command, IndexQueryArgs):
-                rows = query_analytical_index(index_command.db, index_command.sql)
-                print(json.dumps(rows, indent=2))
-                return 0
-            if isinstance(index_command, IndexDropArgs):
-                drop_analytical_index(index_command.db)
-                print("ok")
-                return 0
+            )
+            return 0
 
         if isinstance(command, LogArgs):
             repo = open_repository(command.root)
@@ -985,20 +834,6 @@ def run_cli(argv: list[str] | None = None) -> int:
                 return 2
             checkout(command.root, command.name)
             print(f"Switched to branch '{command.name}'")
-            return 0
-
-        if isinstance(command, TransferArgs):
-            commands = generate_transfer_commands(
-                command.root,
-                mode=command.mode,
-                include_metadata=command.include_metadata,
-            )
-            text = "\n".join(commands)
-            if command.output:
-                Path(command.output).write_text(text + "\n")
-                print(f"Wrote {len(commands)} s5cmd command(s) to {command.output}")
-            else:
-                print(text)
             return 0
     except HANDLED_CLI_ERRORS as error:
         print(f"{command_name} error: {error}", file=sys.stderr)

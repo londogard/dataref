@@ -291,12 +291,14 @@ class FluxelRepository:
     def commit(
         self,
         message: str,
-        identity_mode: Literal["blake3", "meta"] = "blake3",
     ) -> str:
         if not message.strip():
             raise ValueError("Commit message cannot be empty")
-        if identity_mode not in {"blake3", "meta"}:
-            raise ValueError("identity_mode must be one of: blake3, meta")
+
+        config = BaseConfig.load(self.root)
+        identity_mode = config.identity if config else "blake3"
+        if identity_mode not in ("blake3", "meta"):
+            identity_mode = "blake3"
 
         branch = self.current_branch()
         self._ensure_branch_exists(branch)
@@ -319,7 +321,7 @@ class FluxelRepository:
         if staged_additions:
             staged_entries = sorted(
                 (self._entry_from_stage_change(
-                    c, c.identity_mode or identity_mode, store_blob=True,
+                    c, c.identity_mode or "blake3", store_blob=True,
                 ) for c in staged_additions.values()),
                 key=lambda e: e.path,
             )
@@ -366,9 +368,11 @@ class FluxelRepository:
                 self._store_blob(file_entry.path, blob_hash)
             else:
                 blob_hash = None
+            source_uri: str | None = None
         else:
             identity_value = metadata_identity(relative_path, file_entry.size)
             blob_hash = None
+            source_uri = file_entry.path.as_uri()
         return ManifestEntry(
             path=relative_path,
             hash=identity_value,
@@ -377,7 +381,7 @@ class FluxelRepository:
             identity_mode=identity_mode,
             identity_value=identity_value,
             blob_hash=blob_hash,
-            source_uri=file_entry.path.as_uri(),
+            source_uri=source_uri,
         )
 
     def _iter_commit_entries(
@@ -396,7 +400,6 @@ class FluxelRepository:
             wf_path = wf.relative_path if wf else None
             pe_path = pe.path if pe else None
 
-            # Parent entry is staged for removal — skip it
             if pe is not None and _path_is_removed(pe_path, staged_removed_paths):
                 pe = next(parent_stream, None)
                 continue
@@ -408,7 +411,7 @@ class FluxelRepository:
                 yield pe
                 pe = next(parent_stream, None)
             elif wf_path == pe_path:
-                if self._entry_is_modified(wf, pe, identity_mode):
+                if self._entry_is_modified(wf, pe):
                     yield self._entry_from_file_entry(wf, identity_mode, store_blob=True)
                 else:
                     yield pe
@@ -421,15 +424,17 @@ class FluxelRepository:
                 yield pe
                 pe = next(parent_stream, None)
 
+    @staticmethod
     def _entry_is_modified(
-        self, file_entry: FileEntry, manifest_entry: ManifestEntry, identity_mode: str
+        file_entry: FileEntry, manifest_entry: ManifestEntry
     ) -> bool:
         if file_entry.size != manifest_entry.size:
             return True
-        if identity_mode == "blake3":
-            current_hash = blake3_digest_file(file_entry.path)
-            return current_hash != manifest_entry.hash
-        return False
+        if manifest_entry.identity_mode == "meta" and manifest_entry.blob_hash is None:
+            metadata_hash = metadata_identity(file_entry.relative_path, file_entry.size)
+            return metadata_hash != manifest_entry.hash
+        current_hash = blake3_digest_file(file_entry.path)
+        return current_hash != manifest_entry.hash
 
     def import_s3(
         self,
@@ -1756,11 +1761,9 @@ def open_repository(
 def commit(
     root: str | Path,
     message: str,
-    identity_mode: str = "blake3",
 ) -> str:
     return open_repository(root).commit(
         message,
-        identity_mode=identity_mode,
     )
 
 
