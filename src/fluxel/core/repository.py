@@ -129,8 +129,12 @@ class StageStatus:
         object.__setattr__(self, "removed", list(self.removed))
         object.__setattr__(self, "modified", list(self.modified))
         object.__setattr__(self, "working_tree_added", list(self.working_tree_added))
-        object.__setattr__(self, "working_tree_removed", list(self.working_tree_removed))
-        object.__setattr__(self, "working_tree_modified", list(self.working_tree_modified))
+        object.__setattr__(
+            self, "working_tree_removed", list(self.working_tree_removed)
+        )
+        object.__setattr__(
+            self, "working_tree_modified", list(self.working_tree_modified)
+        )
 
 
 class RefConflictError(RuntimeError):
@@ -291,6 +295,8 @@ class FluxelRepository:
     def commit(
         self,
         message: str,
+        *,
+        staged_only: bool = False,
     ) -> str:
         if not message.strip():
             raise ValueError("Commit message cannot be empty")
@@ -320,15 +326,22 @@ class FluxelRepository:
 
         if staged_additions:
             staged_entries = sorted(
-                (self._entry_from_stage_change(
-                    c, c.identity_mode or "blake3", store_blob=True,
-                ) for c in staged_additions.values()),
+                (
+                    self._entry_from_stage_change(
+                        c,
+                        c.identity_mode or "blake3",
+                        store_blob=True,
+                    )
+                    for c in staged_additions.values()
+                ),
                 key=lambda e: e.path,
             )
             if parent_manifest_entries:
-                parent_stream: Iterator[ManifestEntry] | None = _merge_sorted_entry_streams(
-                    base_entries=parent_manifest_entries,
-                    new_entries=iter(staged_entries),
+                parent_stream: Iterator[ManifestEntry] | None = (
+                    _merge_sorted_entry_streams(
+                        base_entries=parent_manifest_entries,
+                        new_entries=iter(staged_entries),
+                    )
                 )
             else:
                 parent_stream = iter(staged_entries)
@@ -340,6 +353,7 @@ class FluxelRepository:
                 parent_stream=parent_stream,
                 staged_removed_paths=staged_removed_paths,
                 identity_mode=identity_mode,
+                staged_only=staged_only,
             )
         )
         manifest_hash = blake3_digest_file(temp_manifest)
@@ -390,7 +404,17 @@ class FluxelRepository:
         parent_stream: Iterator[ManifestEntry] | None,
         staged_removed_paths: set[str],
         identity_mode: str,
+        staged_only: bool = False,
     ) -> Iterator[ManifestEntry]:
+        if staged_only:
+            if parent_stream is None:
+                return
+            for entry in parent_stream:
+                if _path_is_removed(entry.path, staged_removed_paths):
+                    continue
+                yield entry
+            return
+
         worktree_iter = walk_files(self.root)
 
         wf: FileEntry | None = next(worktree_iter, None)
@@ -412,7 +436,9 @@ class FluxelRepository:
                 pe = next(parent_stream, None)
             elif wf_path == pe_path:
                 if self._entry_is_modified(wf, pe):
-                    yield self._entry_from_file_entry(wf, identity_mode, store_blob=True)
+                    yield self._entry_from_file_entry(
+                        wf, identity_mode, store_blob=True
+                    )
                 else:
                     yield pe
                 wf = next(worktree_iter, None)
@@ -646,7 +672,9 @@ class FluxelRepository:
             moved_paths=sorted(moved_paths),
         )
 
-    def status(self, *, ref: str | None = None, working_tree: bool = False) -> StageStatus:
+    def status(
+        self, *, ref: str | None = None, working_tree: bool = False
+    ) -> StageStatus:
         branch = ref or self.current_branch()
         self._ensure_branch_exists(branch)
         staged = self._load_stage(branch)
@@ -673,7 +701,9 @@ class FluxelRepository:
             working_tree_modified=wt_modified,
         )
 
-    def _compare_working_tree(self, branch: str) -> tuple[list[str], list[str], list[str]]:
+    def _compare_working_tree(
+        self, branch: str
+    ) -> tuple[list[str], list[str], list[str]]:
         head_commit = self.head_commit()
         if head_commit is None:
             manifest_paths: set[str] = set()
@@ -705,7 +735,10 @@ class FluxelRepository:
             manifest_entry = manifest_by_path[path]
             working_file = working_files[path]
             current_hash = blake3_digest_file(working_file.path)
-            if current_hash != manifest_entry.hash or working_file.size != manifest_entry.size:
+            if (
+                current_hash != manifest_entry.hash
+                or working_file.size != manifest_entry.size
+            ):
                 modified_paths.append(path)
 
         return added_paths, removed_paths, modified_paths
@@ -783,10 +816,7 @@ class FluxelRepository:
                 )
                 from_entry = next(from_iter, None)
             elif from_entry.path == to_entry.path:
-                if (
-                    from_entry.hash != to_entry.hash
-                    or from_entry.size != to_entry.size
-                ):
+                if from_entry.hash != to_entry.hash or from_entry.size != to_entry.size:
                     changes.append(
                         DiffEntry(
                             path=from_entry.path,
@@ -1310,9 +1340,7 @@ class FluxelRepository:
             self.client_state.write_staging_payload(branch, None)
             return
         payload = msgspec.json.format(
-            msgspec.json.encode(
-                sorted(staged.values(), key=lambda item: item.path)
-            ),
+            msgspec.json.encode(sorted(staged.values(), key=lambda item: item.path)),
             indent=2,
         )
         self.client_state.write_staging_payload(
@@ -1517,7 +1545,10 @@ class FluxelRepository:
                     commands.append(f"cp {s3_uri} {local}")
 
         if include_metadata:
-            for manifest_hash, extension in [(commit.manifest, "jsonl"), (commit.manifest, "idx")]:
+            for manifest_hash, extension in [
+                (commit.manifest, "jsonl"),
+                (commit.manifest, "idx"),
+            ]:
                 s3_key = f"manifests/{manifest_hash}.{extension}"
                 if s3_prefix:
                     s3_key = f"{s3_prefix}/{s3_key}"
@@ -1625,9 +1656,7 @@ class FluxelRepository:
             }
             with NamedTemporaryFile(mode="wb", suffix=".idx", delete=False) as temp:
                 temp_path = Path(temp.name)
-                temp.write(
-                    json.dumps(payload, separators=(",", ":")).encode("utf-8")
-                )
+                temp.write(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
             return temp_path
         return build_manifest_index_file(manifest_path)
 
@@ -1761,9 +1790,12 @@ def open_repository(
 def commit(
     root: str | Path,
     message: str,
+    *,
+    staged_only: bool = False,
 ) -> str:
     return open_repository(root).commit(
         message,
+        staged_only=staged_only,
     )
 
 
@@ -1898,7 +1930,9 @@ def move_staged(
     return repo.status(ref=branch)
 
 
-def status(root: str | Path, *, ref: str | None = None, working_tree: bool = True) -> StageStatus:
+def status(
+    root: str | Path, *, ref: str | None = None, working_tree: bool = True
+) -> StageStatus:
     return open_repository(root).status(ref=ref, working_tree=working_tree)
 
 

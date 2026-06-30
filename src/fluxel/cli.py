@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -50,6 +49,11 @@ HANDLED_CLI_ERRORS = (
 @dataclass
 class CommitArgs:
     message: str = field(alias=["-m", "--message"], help="Commit message")
+    staged_only: bool = flag(
+        False,
+        alias=["--staged", "--staged-only"],
+        help="Commit only staged changes, ignoring the working tree",
+    )
     root: str = field(
         default=".",
         alias="--repo",
@@ -68,6 +72,11 @@ class AddArgs:
         alias="--as",
         help="Logical destination path for a single staged source",
     )
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print result as structured JSON",
+    )
     root: str = field(
         default=".",
         alias="--repo",
@@ -78,6 +87,11 @@ class AddArgs:
 @dataclass
 class RmArgs:
     paths: list[str] = field(positional=True, nargs="+", help="Paths to remove")
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print result as structured JSON",
+    )
     root: str = field(
         default=".",
         alias="--repo",
@@ -91,6 +105,11 @@ class MoveArgs:
     destination_path: str = field(
         positional=True,
         help="Destination path or prefix",
+    )
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print result as structured JSON",
     )
     root: str = field(
         default=".",
@@ -163,15 +182,22 @@ class ListArgs:
 
 @dataclass
 class CheckoutArgs:
-    name: str | None = field(
+    name: str = field(
         positional=True,
-        default=None,
-        help="Branch name to switch to (omit with --ref to restore files)",
+        help="Branch name to switch to",
     )
-    ref: str | None = field(
-        default=None,
-        alias="--ref",
-        help="Ref (branch/commit) to restore files from",
+    root: str = field(
+        default=".",
+        alias="--repo",
+        help="Repository path or URI",
+    )
+
+
+@dataclass
+class RestoreArgs:
+    ref: str = field(
+        positional=True,
+        help="Ref (branch or commit) to restore files from",
     )
     path: list[str] = field(
         default_factory=list,
@@ -179,8 +205,8 @@ class CheckoutArgs:
         action="append",
         help="File paths to restore (repeatable, default: all files in ref)",
     )
-    force: bool = field(
-        default=False,
+    force: bool = flag(
+        False,
         alias="--force",
         help="Allow overwriting existing files",
     )
@@ -226,19 +252,6 @@ class ConfigInitArgs:
 
 
 @dataclass
-class ConfigGetArgs:
-    key: str = field(
-        positional=True,
-        help="Config key (e.g. backend, dataset_root, default_branch, s3.bucket)",
-    )
-    root: str = field(
-        default=".",
-        alias="--repo",
-        help="Repository path",
-    )
-
-
-@dataclass
 class ConfigSetArgs:
     key: str = field(
         positional=True, help="Config key (e.g. backend, dataset_root, s3.bucket)"
@@ -261,16 +274,47 @@ class ConfigListArgs:
 
 
 @dataclass
+class InitArgs:
+    root: str = field(
+        default=".",
+        alias="--repo",
+        help="Repository path",
+    )
+    backend: str = field(
+        default="local",
+        alias="--backend",
+        help="Backend type (local or s3)",
+    )
+    s3_bucket: str | None = field(
+        default=None,
+        alias="--s3-bucket",
+        help="S3 bucket name (required for s3 backend)",
+    )
+    s3_prefix: str | None = field(
+        default=None,
+        alias="--s3-prefix",
+        help="S3 key prefix",
+    )
+    s3_endpoint: str | None = field(
+        default=None,
+        alias="--s3-endpoint",
+        help="S3 endpoint URL",
+    )
+    default_branch: str = field(
+        default="main",
+        alias="--default-branch",
+        help="Default branch name",
+    )
+
+
+@dataclass
 class ConfigArgs:
-    command: ConfigInitArgs | ConfigGetArgs | ConfigSetArgs | ConfigListArgs = (
-        subparsers(
-            {
-                "init": ConfigInitArgs,
-                "get": ConfigGetArgs,
-                "set": ConfigSetArgs,
-                "list": ConfigListArgs,
-            }
-        )
+    command: ConfigInitArgs | ConfigSetArgs | ConfigListArgs = subparsers(
+        {
+            "init": ConfigInitArgs,
+            "set": ConfigSetArgs,
+            "list": ConfigListArgs,
+        }
     )
 
 
@@ -290,6 +334,11 @@ class DiffArgs:
 class MergeArgs:
     source_ref: str = field(positional=True, help="Ref to merge from")
     target_ref: str = field(positional=True, help="Branch ref to fast-forward")
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print result as structured JSON",
+    )
     root: str = field(
         default=".",
         alias="--repo",
@@ -315,6 +364,11 @@ class VerifyArgs:
         alias="--dry-run",
         help="Report entries that would be verified without writing blobs or commits",
     )
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print result as structured JSON",
+    )
 
 
 @dataclass
@@ -332,6 +386,11 @@ class IndexBuildArgs:
     parquet: bool = flag(
         False,
         help="Also export Parquet from the index table",
+    )
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print result as structured JSON",
     )
 
 
@@ -360,6 +419,8 @@ class FluxelCLI:
         | LogArgs
         | ListArgs
         | CheckoutArgs
+        | RestoreArgs
+        | InitArgs
         | ConfigArgs
     ) = subparsers(
         {
@@ -376,6 +437,8 @@ class FluxelCLI:
             "log": LogArgs,
             "list": ListArgs,
             "checkout": CheckoutArgs,
+            "restore": RestoreArgs,
+            "init": InitArgs,
             "config": ConfigArgs,
         }
     )
@@ -447,26 +510,6 @@ def _flatten_option_values(values: list[object]) -> list[str]:
     return flattened
 
 
-def _config_get_value(config: FluxelConfig, key: str) -> object | None:
-    if key == "backend":
-        return "s3" if isinstance(config, S3Config) else "local"
-    if key == "dataset_root":
-        return config.dataset_root
-    if key == "default_branch":
-        return config.default_branch
-    if key == "identity":
-        return config.identity
-    if key == "transfer_backend":
-        return config.transfer_backend
-    if key == "s3.bucket":
-        return config.bucket if isinstance(config, S3Config) else None
-    if key == "s3.prefix":
-        return config.prefix if isinstance(config, S3Config) else None
-    if key == "s3.endpoint_url":
-        return config.endpoint_url if isinstance(config, S3Config) else None
-    return None
-
-
 def _config_set_value(config: FluxelConfig, key: str, value: str) -> FluxelConfig:
     if key == "backend":
         if value not in ("local", "s3"):
@@ -480,7 +523,9 @@ def _config_set_value(config: FluxelConfig, key: str, value: str) -> FluxelConfi
                     bucket=bucket,
                 )
             except ValueError:
-                raise ValueError("Cannot switch to S3 backend without a bucket. Set s3.bucket first.")
+                raise ValueError(
+                    "Cannot switch to S3 backend without a bucket. Set s3.bucket first."
+                )
         return LocalConfig(
             dataset_root=config.dataset_root,
             default_branch=config.default_branch,
@@ -541,13 +586,15 @@ def _command_name(command: object) -> str:
         return "list"
     if isinstance(command, CheckoutArgs):
         return "checkout"
+    if isinstance(command, RestoreArgs):
+        return "restore"
+    if isinstance(command, InitArgs):
+        return "init"
     if isinstance(command, IndexArgs):
         return "index build"
     if isinstance(command, ConfigArgs):
         if isinstance(command.command, ConfigInitArgs):
             return "config init"
-        if isinstance(command.command, ConfigGetArgs):
-            return "config get"
         if isinstance(command.command, ConfigSetArgs):
             return "config set"
         if isinstance(command.command, ConfigListArgs):
@@ -559,7 +606,10 @@ def _command_name(command: object) -> str:
 def run_cli(argv: list[str] | None = None) -> int:
     argv = argv or sys.argv[1:]
     parser = build_parser()
-    args = parser.parse_args(argv).cli
+    try:
+        args = parser.parse_args(argv).cli
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
     command = args.command
     command_name = _command_name(command)
 
@@ -568,6 +618,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             commit_id = commit(
                 command.root,
                 command.message,
+                staged_only=command.staged_only,
             )
             print(commit_id)
             return 0
@@ -579,12 +630,18 @@ def run_cli(argv: list[str] | None = None) -> int:
                 identity_mode=command.identity,
                 destination_path=command.destination_path,
             )
-            print(json.dumps(_stage_payload(stage), indent=2))
+            if command.json:
+                print(json.dumps(_stage_payload(stage), indent=2))
+            else:
+                _print_status(stage)
             return 0
 
         if isinstance(command, RmArgs):
             stage = rm(root=command.root, paths=command.paths)
-            print(json.dumps(_stage_payload(stage), indent=2))
+            if command.json:
+                print(json.dumps(_stage_payload(stage), indent=2))
+            else:
+                _print_status(stage)
             return 0
 
         if isinstance(command, MoveArgs):
@@ -593,7 +650,10 @@ def run_cli(argv: list[str] | None = None) -> int:
                 source_path=command.source_path,
                 destination_path=command.destination_path,
             )
-            print(json.dumps(_stage_payload(stage), indent=2))
+            if command.json:
+                print(json.dumps(_stage_payload(stage), indent=2))
+            else:
+                _print_status(stage)
             return 0
 
         if isinstance(command, StatusArgs):
@@ -641,17 +701,27 @@ def run_cli(argv: list[str] | None = None) -> int:
                 source_ref=command.source_ref,
                 target_ref=command.target_ref,
             )
-            print(
-                json.dumps(
-                    {
-                        "source_ref": result.source_ref,
-                        "target_ref": result.target_ref,
-                        "commit_id": result.commit_id,
-                        "updated": result.updated,
-                    },
-                    indent=2,
+            if command.json:
+                print(
+                    json.dumps(
+                        {
+                            "source_ref": result.source_ref,
+                            "target_ref": result.target_ref,
+                            "commit_id": result.commit_id,
+                            "updated": result.updated,
+                        },
+                        indent=2,
+                    )
                 )
-            )
+            else:
+                if result.updated:
+                    print(
+                        f"Merged '{result.source_ref}' into '{result.target_ref}' ({result.commit_id})"
+                    )
+                else:
+                    print(
+                        f"'{result.target_ref}' is already up to date with '{result.source_ref}'"
+                    )
             return 0
 
         if isinstance(command, VerifyArgs):
@@ -660,15 +730,24 @@ def run_cli(argv: list[str] | None = None) -> int:
                 path_prefixes=_flatten_option_values(command.path),
                 dry_run=command.dry_run,
             )
-            payload = {
-                "commit_id": result.commit_id,
-                "verified_entries": result.verified_entries,
-                "candidate_entries": result.candidate_entries,
-                "total_entries": result.total_entries,
-                "created_commit": result.created_commit,
-                "dry_run": result.dry_run,
-            }
-            print(json.dumps(payload, indent=2))
+            if command.json:
+                payload = {
+                    "commit_id": result.commit_id,
+                    "verified_entries": result.verified_entries,
+                    "candidate_entries": result.candidate_entries,
+                    "total_entries": result.total_entries,
+                    "created_commit": result.created_commit,
+                    "dry_run": result.dry_run,
+                }
+                print(json.dumps(payload, indent=2))
+            else:
+                verb = "Would verify" if result.dry_run else "Verified"
+                print(
+                    f"{verb} {result.verified_entries}/{result.candidate_entries} entries "
+                    f"(total: {result.total_entries})"
+                )
+                if result.created_commit:
+                    print(f"Created commit: {result.commit_id}")
             return 0
 
         if isinstance(command, IndexArgs):
@@ -678,19 +757,24 @@ def run_cli(argv: list[str] | None = None) -> int:
                 output_dir=cmd.output_dir,
                 export_parquet=cmd.parquet,
             )
-            print(
-                json.dumps(
-                    {
-                        "database_path": str(paths.database_path),
-                        "parquet_path": (
-                            str(paths.parquet_path)
-                            if paths.parquet_path is not None
-                            else None
-                        ),
-                    },
-                    indent=2,
+            if cmd.json:
+                print(
+                    json.dumps(
+                        {
+                            "database_path": str(paths.database_path),
+                            "parquet_path": (
+                                str(paths.parquet_path)
+                                if paths.parquet_path is not None
+                                else None
+                            ),
+                        },
+                        indent=2,
+                    )
                 )
-            )
+            else:
+                print(f"Database: {paths.database_path}")
+                if paths.parquet_path:
+                    print(f"Parquet:  {paths.parquet_path}")
             return 0
 
         if isinstance(command, LogArgs):
@@ -764,26 +848,6 @@ def run_cli(argv: list[str] | None = None) -> int:
                 path = config.save(config_command.root)
                 print(f"Config initialized: {path}")
                 return 0
-            if isinstance(config_command, ConfigGetArgs):
-                config = BaseConfig.load(config_command.root)
-                if config is None:
-                    print(
-                        "No config found. Run 'fluxel config init' first.",
-                        file=sys.stderr,
-                    )
-                    return 2
-                value = _config_get_value(config, config_command.key)
-                if value is None:
-                    print(
-                        f"Unknown config key: {config_command.key}",
-                        file=sys.stderr,
-                    )
-                    return 2
-                if isinstance(value, str):
-                    print(value)
-                else:
-                    print(json.dumps(value))
-                return 0
             if isinstance(config_command, ConfigSetArgs):
                 config = BaseConfig.load(config_command.root)
                 if config is None:
@@ -811,29 +875,37 @@ def run_cli(argv: list[str] | None = None) -> int:
                 return 0
 
         if isinstance(command, CheckoutArgs):
-            if command.ref is not None:
-                restored = restore_files(
-                    command.root,
-                    command.ref,
-                    paths=_flatten_option_values(command.path) or None,
-                    force=command.force,
-                )
-                if not restored:
-                    print("Nothing to restore")
-                else:
-                    rel_paths = "\n".join(f"  restored: {p}" for p in restored)
-                    print(
-                        f"Restored {len(restored)} file(s) from '{command.ref}':\n{rel_paths}"
-                    )
-                return 0
-            if command.name is None:
-                print(
-                    "Either specify --ref <ref> to restore files or a branch name to switch to",
-                    file=sys.stderr,
-                )
-                return 2
             checkout(command.root, command.name)
             print(f"Switched to branch '{command.name}'")
+            return 0
+
+        if isinstance(command, RestoreArgs):
+            restored = restore_files(
+                command.root,
+                command.ref,
+                paths=_flatten_option_values(command.path) or None,
+                force=command.force,
+            )
+            if not restored:
+                print("Nothing to restore")
+            else:
+                rel_paths = "\n".join(f"  restored: {p}" for p in restored)
+                print(
+                    f"Restored {len(restored)} file(s) from '{command.ref}':\n{rel_paths}"
+                )
+            return 0
+
+        if isinstance(command, InitArgs):
+            config = init_config(
+                command.root,
+                backend=command.backend,  # type: ignore[arg-type]
+                default_branch=command.default_branch,
+                s3_bucket=command.s3_bucket,
+                s3_prefix=command.s3_prefix,
+                s3_endpoint_url=command.s3_endpoint,
+            )
+            path = config.save(command.root)
+            print(f"Repository initialized: {path}")
             return 0
     except HANDLED_CLI_ERRORS as error:
         print(f"{command_name} error: {error}", file=sys.stderr)

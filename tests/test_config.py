@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from fluxel import run_cli
 from fluxel.core.config import (
     CURRENT_FORMAT_VERSION,
@@ -70,16 +72,11 @@ def test_config_list_via_cli(tmp_path: Path, capsys) -> None:
     assert "s3" not in payload
 
 
-def test_config_get_via_cli(tmp_path: Path, capsys) -> None:
+def test_config_get_subcommand_is_removed(tmp_path: Path) -> None:
     (tmp_path / "f.txt").write_text("x")
     assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
-    capsys.readouterr()
 
-    assert run_cli(["config", "get", "--repo", str(tmp_path), "backend"]) == 0
-    assert capsys.readouterr().out.strip() == "local"
-
-    assert run_cli(["config", "get", "--repo", str(tmp_path), "dataset_root"]) == 0
-    assert capsys.readouterr().out.strip() == str(tmp_path)
+    assert run_cli(["config", "get", "--repo", str(tmp_path), "backend"]) == 2
 
 
 def test_config_set_via_cli(tmp_path: Path, capsys) -> None:
@@ -88,9 +85,7 @@ def test_config_set_via_cli(tmp_path: Path, capsys) -> None:
     capsys.readouterr()
 
     assert (
-        run_cli(
-            ["config", "set", "--repo", str(tmp_path), "default_branch", "develop"]
-        )
+        run_cli(["config", "set", "--repo", str(tmp_path), "default_branch", "develop"])
         == 0
     )
     out = capsys.readouterr().out.strip()
@@ -99,16 +94,6 @@ def test_config_set_via_cli(tmp_path: Path, capsys) -> None:
     config = BaseConfig.load(tmp_path)
     assert config is not None
     assert config.default_branch == "develop"
-
-
-def test_config_get_unknown_key_returns_error(tmp_path: Path, capsys) -> None:
-    (tmp_path / "f.txt").write_text("x")
-    assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
-    capsys.readouterr()
-
-    assert run_cli(["config", "get", "--repo", str(tmp_path), "nonexistent"]) == 2
-    stderr = capsys.readouterr().err
-    assert "Unknown config key" in stderr
 
 
 def test_config_no_config_error(tmp_path: Path, capsys) -> None:
@@ -155,7 +140,7 @@ def test_config_init_idempotent(tmp_path: Path, capsys) -> None:
     assert isinstance(config, LocalConfig)
 
 
-def test_config_set_s3_bucket_then_get(tmp_path: Path, capsys) -> None:
+def test_config_set_s3_bucket_and_list(tmp_path: Path, capsys) -> None:
     (tmp_path / "f.txt").write_text("x")
     assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
     capsys.readouterr()
@@ -175,8 +160,9 @@ def test_config_set_s3_bucket_then_get(tmp_path: Path, capsys) -> None:
     )
     capsys.readouterr()
 
-    assert run_cli(["config", "get", "--repo", str(tmp_path), "s3.bucket"]) == 0
-    assert capsys.readouterr().out.strip() == "my-bucket"
+    assert run_cli(["config", "list", "--repo", str(tmp_path)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["bucket"] == "my-bucket"
 
 
 def test_config_default_format_version(tmp_path: Path) -> None:
@@ -207,7 +193,13 @@ def test_repo_rejects_unsupported_format_version(tmp_path: Path) -> None:
 def test_config_missing_format_version_defaults_to_current(tmp_path: Path) -> None:
     (tmp_path / ".fluxel").mkdir()
     (tmp_path / ".fluxel" / "config.json").write_text(
-        json.dumps({"backend": "local", "dataset_root": str(tmp_path), "default_branch": "main"})
+        json.dumps(
+            {
+                "backend": "local",
+                "dataset_root": str(tmp_path),
+                "default_branch": "main",
+            }
+        )
     )
     config = BaseConfig.load(tmp_path)
     assert config is not None

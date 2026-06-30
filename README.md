@@ -33,6 +33,7 @@ Fluxel is intentionally in MVP mode.
 
 - Commit snapshots over a dataset root (`fluxel commit`).
 - Repository URI support via `--repo <path|s3://bucket/prefix>` and `open_repository(...)`.
+- Repository initialization (`fluxel init`) with local or S3 backend.
 - Streaming S3 imports (`fluxel import`) with `blake3` or metadata identity modes.
 - Branch-scoped staging workflow (`fluxel add`, `fluxel rm`, `fluxel status`, `fluxel commit --staged`).
 - Incremental ingress paths that preserve existing manifest entries while adding only new content metadata/blobs.
@@ -42,9 +43,11 @@ Fluxel is intentionally in MVP mode.
 - Fast-forward-only branch merge (`fluxel merge`).
 - Metadata-only diff between refs (`fluxel diff`).
 - Metadata-only manifest mutations for committed refs (`fluxel rm -m ...`, `fluxel mv -m ... ...`).
+- File restoration from refs (`fluxel restore <ref> [--path ...] [--force]`).
 - Disposable analytical index from manifest (`fluxel index build/query/drop`, DuckDB + optional Parquet export).
 - `fsspec` provider for `fluxel://` URI reads.
 - Local + S3 storage backend abstractions available in code.
+- Human-readable output by default; `--json` flag on all commands for programmatic use.
 
 ### Not Wired Yet
 
@@ -79,7 +82,11 @@ If your company uses Fluxel, sponsor ongoing maintenance at <https://github.com/
 ## Quickstart
 
 ```bash
+# Initialize a new repository
 mkdir -p /tmp/fluxel-demo
+uv run fluxel init --repo /tmp/fluxel-demo
+# Or with S3 backend: uv run fluxel init --repo /tmp/fluxel-demo --backend s3 --s3-bucket my-bucket
+
 echo "hello" > /tmp/fluxel-demo/a.txt
 
 uv run fluxel commit --repo /tmp/fluxel-demo -m "initial"
@@ -92,14 +99,21 @@ uv run fluxel verify --repo /tmp/fluxel-demo --ref main
 
 # branch-scoped staged flow
 uv run fluxel branch --repo /tmp/fluxel-demo feature
-uv run fluxel add --repo /tmp/fluxel-demo --ref feature data/new.csv
-uv run fluxel add --repo /tmp/fluxel-demo --ref feature --as imports/raw.csv /tmp/outside-repo/raw.csv
-uv run fluxel add --repo /tmp/fluxel-demo --ref feature --as imports/bundle /tmp/outside-repo/bundle
-uv run fluxel add --repo /tmp/fluxel-demo --ref feature --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
-uv run fluxel add --repo /tmp/fluxel-demo --ref feature --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
-uv run fluxel status --repo /tmp/fluxel-demo --ref feature
-uv run fluxel commit --repo /tmp/fluxel-demo --ref feature --staged -m "feature updates"
+uv run fluxel checkout --repo /tmp/fluxel-demo feature
+uv run fluxel add --repo /tmp/fluxel-demo data/new.csv
+uv run fluxel add --repo /tmp/fluxel-demo --as imports/raw.csv /tmp/outside-repo/raw.csv
+uv run fluxel add --repo /tmp/fluxel-demo --as imports/bundle /tmp/outside-repo/bundle
+uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
+uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
+uv run fluxel status --repo /tmp/fluxel-demo
+uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "feature updates"
+uv run fluxel checkout --repo /tmp/fluxel-demo main
 uv run fluxel merge --repo /tmp/fluxel-demo feature main
+
+# restore files from a ref
+uv run fluxel restore --repo /tmp/fluxel-demo main
+uv run fluxel restore --repo /tmp/fluxel-demo main --path data/new.csv
+uv run fluxel restore --repo /tmp/fluxel-demo main --force
 
 echo "hello v2" > /tmp/fluxel-demo/a.txt
 uv run fluxel commit --repo /tmp/fluxel-demo -m "update"
@@ -122,6 +136,11 @@ uv run fluxel branch --repo s3://my-bucket/datasets/demo feature
 uv run fluxel commit --repo s3://my-bucket/datasets/demo -m "snapshot current working tree"
 uv run fluxel rm --repo s3://my-bucket/datasets/demo obsolete -m "drop obsolete paths"
 uv run fluxel mv --repo s3://my-bucket/datasets/demo bootstrap final -m "rename imported prefix"
+
+# JSON output for programmatic use (all commands support --json)
+uv run fluxel status --repo /tmp/fluxel-demo --json
+uv run fluxel add --repo /tmp/fluxel-demo data/new.csv --json
+uv run fluxel diff --repo /tmp/fluxel-demo main feature --json
 ```
 
 ## Analytical Index (Derived, Disposable)
