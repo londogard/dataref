@@ -3,9 +3,7 @@ name = "fluxel"
 version = "0.1.0"
 description = "A client-first, object-storage-first data versioning engine"
 readme = "README.md"
-authors = [
-    { name = "Hampus Londögård", email = "hampus.londogard@verisure.com" },
-]
+authors = [{ name = "Hampus Londögård", email = "hampus.londogard@gmail.com" }]
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
 keywords = [
@@ -43,14 +41,18 @@ Changelog = "https://github.com/londogard/strand/blob/main/CHANGELOG.md"
 Funding = "https://github.com/sponsors/londogard"
 
 [project.scripts]
-fluxel = "fluxel:main"
+fluxel = "fluxel.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
-dev = ["pytest>=9.0.2"]
+dev = ["pytest>=9.0.2", "pyrefly>=0.3.0"]
+
+[tool.pyrefly]
+project-includes = ["src/fluxel"]
+project-excludes = ["tests/"]
 
 [tool.pytest.ini_options]
 markers = [

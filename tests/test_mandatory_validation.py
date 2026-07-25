@@ -210,7 +210,7 @@ def test_manifest_entry_validation_rejects_invalid_payloads() -> None:
 
     for payload, message in invalid_payloads:
         with pytest.raises(ValueError, match=message):
-            ManifestEntry.from_dict(payload)
+            ManifestEntry.from_dict(payload)  # type: ignore[arg-type]
 
 
 def test_manifest_reader_reports_corrupt_json_with_line_context(
@@ -690,8 +690,9 @@ def test_commit_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
     else:
         raise AssertionError("Expected RefConflictError")
 
-    assert store.read_branch_ref("main") is not None
-    assert store.read_branch_ref("main").commit_id == conflict_commit_id
+    state = store.read_branch_ref("main")
+    assert state is not None
+    assert state.commit_id == conflict_commit_id
 
 
 def test_merge_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
@@ -779,7 +780,9 @@ def test_commit_meta_no_redundant_path_stat(tmp_path: Path, monkeypatch) -> None
     )
 
 
-def test_streaming_diff_does_not_use_manifest_index_dict(tmp_path: Path, monkeypatch) -> None:
+def test_streaming_diff_does_not_use_manifest_index_dict(
+    tmp_path: Path, monkeypatch
+) -> None:
     """Verify diff() never calls _manifest_index (which loads full dict)."""
     file_count = 500
     for i in range(file_count):
@@ -934,10 +937,16 @@ def test_fake_s3_scale_100k_files_meta_mode(tmp_path: Path, fake_s3_installer) -
     print(f"  Cached prefix listing: {cached_time * 1000:.3f}ms")
 
     print(f"\n[FAKE S3 SCALE] Summary:")
-    print(f"  Commit:            {commit_time:.2f}s ({100_000 / commit_time:.0f} files/sec)")
+    print(
+        f"  Commit:            {commit_time:.2f}s ({100_000 / commit_time:.0f} files/sec)"
+    )
     print(f"  Single lookup:     {lookup_time * 1000:.3f}ms")
     print(f"  Prefix list (1k):  {listing_time * 1000:.3f}ms")
     print(f"  Cached prefix:     {cached_time * 1000:.3f}ms")
 
-    assert lookup_time < 0.1, f"Single lookup took {lookup_time * 1000:.3f}ms (expected < 100ms)"
-    assert listing_time < 0.2, f"Prefix listing took {listing_time * 1000:.3f}ms (expected < 200ms)"
+    assert (
+        lookup_time < 0.1
+    ), f"Single lookup took {lookup_time * 1000:.3f}ms (expected < 100ms)"
+    assert (
+        listing_time < 0.2
+    ), f"Prefix listing took {listing_time * 1000:.3f}ms (expected < 200ms)"

@@ -5,7 +5,7 @@ from typing import BinaryIO
 
 from blake3 import blake3
 
-DEFAULT_CHUNK_SIZE = 64 * 1024
+DEFAULT_CHUNK_SIZE = 1024 * 1024
 
 
 def blake3_digest_stream(stream: BinaryIO, chunk_size: int = DEFAULT_CHUNK_SIZE) -> str:

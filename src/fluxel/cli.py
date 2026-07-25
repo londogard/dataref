@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import asdict, dataclass
+from typing import Literal, Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 import msgspec
@@ -11,7 +11,9 @@ from simple_parsing import ArgumentParser
 from simple_parsing.helpers import field, flag, subparsers
 
 from .core import (
+    BranchLockState,
     RefConflictError,
+    StageStatus,
     add,
     branch,
     build_analytical_index,
@@ -39,11 +41,24 @@ HANDLED_CLI_ERRORS = (
     BotoCoreError,
     ClientError,
     FileNotFoundError,
-    OSError,
     PermissionError,
     RefConflictError,
     ValueError,
 )
+
+
+def _lock_is_stale(lock_state: BranchLockState, timeout_seconds: int) -> bool:
+    """Return True if *lock_state* has exceeded *timeout_seconds*."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    if lock_state.expires_at is not None:
+        return lock_state.expires_at <= now
+    if lock_state.last_modified is None:
+        return False
+    return (
+        lock_state.last_modified + timedelta(seconds=timeout_seconds) <= now
+    )
 
 
 @dataclass
@@ -319,6 +334,147 @@ class ConfigArgs:
 
 
 @dataclass
+class PushArgs:
+    remote: str = field(positional=True, help="Remote S3 URI (s3://bucket/prefix)")
+    ref: str | None = field(
+        default=None,
+        alias="--ref",
+        help="Branch to push (default: current branch)",
+    )
+    root: str = field(
+        default=".",
+        alias="--repo",
+        help="Repository path or URI",
+    )
+    transfer_backend: str = field(
+        default="boto3",
+        alias="--transfer-backend",
+        help="Blob transfer backend: boto3 (default) or s5cmd",
+    )
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print result as structured JSON",
+    )
+
+
+@dataclass
+class PullArgs:
+    remote: str = field(positional=True, help="Remote S3 URI (s3://bucket/prefix)")
+    ref: str | None = field(
+        default=None,
+        alias="--ref",
+        help="Branch to pull (default: current branch)",
+    )
+    root: str = field(
+        default=".",
+        alias="--repo",
+        help="Repository path or URI",
+    )
+    transfer_backend: str = field(
+        default="boto3",
+        alias="--transfer-backend",
+        help="Blob transfer backend: boto3 (default) or s5cmd",
+    )
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print result as structured JSON",
+    )
+
+
+@dataclass
+class FetchArgs:
+    remote: str = field(positional=True, help="Remote S3 URI (s3://bucket/prefix)")
+    ref: str | None = field(
+        default=None,
+        alias="--ref",
+        help="Branch to fetch (default: current branch)",
+    )
+    root: str = field(
+        default=".",
+        alias="--repo",
+        help="Repository path or URI",
+    )
+    transfer_backend: str = field(
+        default="boto3",
+        alias="--transfer-backend",
+        help="Blob transfer backend: boto3 (default) or s5cmd",
+    )
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print result as structured JSON",
+    )
+
+
+@dataclass
+class TransferArgs:
+    direction: str = field(
+        default="upload",
+        positional=True,
+        help="Transfer direction: upload (local->S3) or download (S3->local)",
+    )
+    execute: bool = flag(
+        False, alias="--execute", help="Execute generated s5cmd/aws commands"
+    )
+    root: str = field(default=".", alias="--repo", help="Repository path or URI")
+    ref: str | None = field(
+        default=None, alias="--ref", help="Ref to transfer (default: current branch)"
+    )
+    json: bool = flag(False, alias="--json", help="Print commands as JSON array")
+
+
+@dataclass
+class LockListArgs:
+    root: str = field(
+        default=".",
+        alias="--repo",
+        help="Repository path or URI (S3-backed only)",
+    )
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print locks as structured JSON",
+    )
+
+
+@dataclass
+class LockCleanupArgs:
+    root: str = field(
+        default=".",
+        alias="--repo",
+        help="Repository path or URI (S3-backed only)",
+    )
+    branch: str | None = field(
+        default=None,
+        positional=True,
+        nargs="?",
+        help="Branch to unlock (omit for all stale locks)",
+    )
+    force: bool = flag(
+        False,
+        alias="--force",
+        help="Release locks even if they are not stale",
+    )
+    json: bool = flag(
+        False,
+        alias="--json",
+        help="Print result as structured JSON",
+    )
+
+
+@dataclass
+class LockArgs:
+    command: LockListArgs | LockCleanupArgs = subparsers(
+        {
+            "list": LockListArgs,
+            "cleanup": LockCleanupArgs,
+        }
+    )
+
+
+@dataclass
 class DiffArgs:
     from_ref: str = field(positional=True, help="Source ref (branch or commit)")
     to_ref: str = field(positional=True, help="Target ref (branch or commit)")
@@ -422,6 +578,11 @@ class FluxelCLI:
         | RestoreArgs
         | InitArgs
         | ConfigArgs
+        | PushArgs
+        | PullArgs
+        | FetchArgs
+        | TransferArgs
+        | LockArgs
     ) = subparsers(
         {
             "commit": CommitArgs,
@@ -440,12 +601,20 @@ class FluxelCLI:
             "restore": RestoreArgs,
             "init": InitArgs,
             "config": ConfigArgs,
+            "push": PushArgs,
+            "pull": PullArgs,
+            "fetch": FetchArgs,
+            "transfer": TransferArgs,
+            "lock": LockArgs,
         }
     )
 
 
-def build_parser() -> ArgumentParser:
-    parser = ArgumentParser(prog="fluxel", description="Fluxel CLI")
+def build_parser() -> _CleanParser:
+    parser = _CleanParser(
+        prog="fluxel",
+        description="Serverless object-storage-first data versioning engine.",
+    )
     parser.add_argument(
         "--version",
         action="version",
@@ -456,7 +625,22 @@ def build_parser() -> ArgumentParser:
     return parser
 
 
-def _print_status(stage: object) -> None:
+class _CleanParser(ArgumentParser):
+    """ArgumentParser that suppresses simple-parsing internal group headers."""
+
+    def format_help(self):
+        import re
+
+        text = super().format_help()
+        text = re.sub(
+            r"FluxelCLI \['cli'\]:\n  FluxelCLI\(command: '[^)]+'\)\n?",
+            "",
+            text,
+        )
+        return text
+
+
+def _print_status(stage: StageStatus) -> None:
     if (
         stage.working_tree_added
         or stage.working_tree_removed
@@ -488,7 +672,7 @@ def _print_status(stage: object) -> None:
         print("Nothing to commit, working tree clean")
 
 
-def _stage_payload(stage: object) -> dict[str, object]:
+def _stage_payload(stage: StageStatus) -> dict[str, object]:
     return {
         "ref": stage.ref,
         "added": stage.added,
@@ -500,7 +684,7 @@ def _stage_payload(stage: object) -> dict[str, object]:
     }
 
 
-def _flatten_option_values(values: list[object]) -> list[str]:
+def _flatten_option_values(values: list[Any]) -> list[str]:
     flattened: list[str] = []
     for value in values:
         if isinstance(value, list):
@@ -592,6 +776,20 @@ def _command_name(command: object) -> str:
         return "init"
     if isinstance(command, IndexArgs):
         return "index build"
+    if isinstance(command, PushArgs):
+        return "push"
+    if isinstance(command, PullArgs):
+        return "pull"
+    if isinstance(command, FetchArgs):
+        return "fetch"
+    if isinstance(command, TransferArgs):
+        return "transfer"
+    if isinstance(command, LockArgs):
+        if isinstance(command.command, LockListArgs):
+            return "lock list"
+        if isinstance(command.command, LockCleanupArgs):
+            return "lock cleanup"
+        return "lock"
     if isinstance(command, ConfigArgs):
         if isinstance(command.command, ConfigInitArgs):
             return "config init"
@@ -621,6 +819,14 @@ def run_cli(argv: list[str] | None = None) -> int:
                 staged_only=command.staged_only,
             )
             print(commit_id)
+            config = BaseConfig.load(command.root)
+            if config is not None and config.identity == "meta":
+                print(
+                    "⚠  Metadata-only identity: this revision is unverifiable "
+                    "until `fluxel verify` is run. "
+                    "You must retain source objects for future verification.",
+                    file=sys.stderr,
+                )
             return 0
 
         if isinstance(command, AddArgs):
@@ -634,6 +840,13 @@ def run_cli(argv: list[str] | None = None) -> int:
                 print(json.dumps(_stage_payload(stage), indent=2))
             else:
                 _print_status(stage)
+            if command.identity == "meta":
+                print(
+                    "⚠  Metadata-only identity: revisions are unverifiable "
+                    "until `fluxel verify` is run. "
+                    "You must retain source objects for future verification.",
+                    file=sys.stderr,
+                )
             return 0
 
         if isinstance(command, RmArgs):
@@ -748,6 +961,13 @@ def run_cli(argv: list[str] | None = None) -> int:
                 )
                 if result.created_commit:
                     print(f"Created commit: {result.commit_id}")
+                remaining = result.candidate_entries - result.verified_entries
+                if remaining > 0 and not result.dry_run:
+                    print(
+                        f"⚠  {remaining} unverifiable entries remain "
+                        f"(source objects must be retained for future verification).",
+                        file=sys.stderr,
+                    )
             return 0
 
         if isinstance(command, IndexArgs):
@@ -907,6 +1127,160 @@ def run_cli(argv: list[str] | None = None) -> int:
             path = config.save(command.root)
             print(f"Repository initialized: {path}")
             return 0
+
+        if isinstance(command, PushArgs):
+            from .core.repository_sync import push
+
+            repo = open_repository(command.root, blob_transfer=command.transfer_backend)
+            result = push(
+                repo,
+                command.remote,
+                ref=command.ref,
+                blob_transfer=command.transfer_backend,
+            )
+            if command.json:
+                print(json.dumps(asdict(result), indent=2))
+            else:
+                if result.updated:
+                    print(
+                        f"Pushed {result.pushed_commits} commit(s), "
+                        f"{result.pushed_blobs} blob(s) to {command.remote}"
+                    )
+                else:
+                    print("Everything up-to-date")
+            return 0
+
+        if isinstance(command, PullArgs):
+            from .core.repository_sync import pull
+
+            repo = open_repository(command.root, blob_transfer=command.transfer_backend)
+            result = pull(
+                repo,
+                command.remote,
+                ref=command.ref,
+                blob_transfer=command.transfer_backend,
+            )
+            if command.json:
+                print(json.dumps(asdict(result), indent=2))
+            else:
+                if result.updated:
+                    print(
+                        f"Pulled {result.pulled_commits} commit(s), "
+                        f"{result.pulled_blobs} blob(s) from {command.remote}"
+                    )
+                else:
+                    print("Already up-to-date")
+            return 0
+
+        if isinstance(command, FetchArgs):
+            from .core.repository_sync import fetch
+
+            repo = open_repository(command.root, blob_transfer=command.transfer_backend)
+            result = fetch(
+                repo,
+                command.remote,
+                ref=command.ref,
+                blob_transfer=command.transfer_backend,
+            )
+            if command.json:
+                print(json.dumps(asdict(result), indent=2))
+            else:
+                print(
+                    f"Fetched {result.fetched_commits} commit(s), "
+                    f"{result.fetched_blobs} blob(s) from {command.remote}"
+                )
+            return 0
+
+        if isinstance(command, TransferArgs):
+            repo = open_repository(command.root)
+            cmds = repo.generate_transfer_commands(
+                ref=command.ref,
+                mode=command.direction,
+                include_metadata=True,
+            )
+            if command.json:
+                print(json.dumps(cmds, indent=2))
+            elif command.execute:
+                import subprocess
+
+                for cmd in cmds:
+                    subprocess.run(cmd, shell=True, check=True)
+                print(f"Executed {len(cmds)} transfer commands")
+            else:
+                for cmd in cmds:
+                    print(cmd)
+            return 0
+
+        if isinstance(command, LockArgs):
+            lock_command = command.command
+            if isinstance(lock_command, LockListArgs):
+                repo = open_repository(lock_command.root)
+                locks = repo.list_locks()
+                if lock_command.json:
+                    payload = {
+                        branch: {
+                            "token": ls.token,
+                            "expires_at": (
+                                ls.expires_at.isoformat()
+                                if ls.expires_at
+                                else None
+                            ),
+                            "last_modified": (
+                                ls.last_modified.isoformat()
+                                if ls.last_modified
+                                else None
+                            ),
+                            "stale": _lock_is_stale(ls, repo.lock_timeout_seconds),
+                        }
+                        for branch, ls in locks.items()
+                    }
+                    print(json.dumps(payload, indent=2))
+                elif not locks:
+                    print("No active locks")
+                else:
+                    timeout = repo.lock_timeout_seconds
+                    print(f"{'Branch':<30} {'Status':<10} {'Expires'}")
+                    print("-" * 60)
+                    for branch_name, ls in sorted(locks.items()):
+                        stale = _lock_is_stale(ls, timeout)
+                        lock_status = "STALE" if stale else "active"
+                        expires = (
+                            ls.expires_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+                            if ls.expires_at
+                            else "unknown"
+                        )
+                        print(
+                            f"{branch_name:<30} {lock_status:<10} {expires}"
+                        )
+                return 0
+
+            if isinstance(lock_command, LockCleanupArgs):
+                repo = open_repository(lock_command.root)
+                locks = repo.list_locks()
+                timeout = repo.lock_timeout_seconds
+
+                released: dict[str, bool] = {}
+                if lock_command.branch is not None:
+                    candidates = {lock_command.branch} & locks.keys()
+                else:
+                    candidates = {
+                        b
+                        for b, ls in locks.items()
+                        if lock_command.force or _lock_is_stale(ls, timeout)
+                    }
+
+                for branch_name in sorted(candidates):
+                    released[branch_name] = repo.force_release_lock(branch_name)
+
+                if lock_command.json:
+                    print(json.dumps({"released": released}, indent=2))
+                elif not released:
+                    print("No locks to release")
+                else:
+                    for branch_name, ok in released.items():
+                        release_status = "Released" if ok else "Not found"
+                        print(f"  {release_status}: {branch_name}")
+                return 0
     except HANDLED_CLI_ERRORS as error:
         print(f"{command_name} error: {error}", file=sys.stderr)
         return 2

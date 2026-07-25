@@ -19,7 +19,6 @@ class BaseConfig(msgspec.Struct, tag_field="backend"):
     default_branch: str = "main"
     identity: str = "blake3"
     transfer_backend: str | None = None
-    transfer_backend: str | None = None
 
     def __post_init__(self) -> None:
         if self.format_version not in SUPPORTED_FORMAT_VERSIONS:
@@ -60,10 +59,6 @@ class LocalConfig(BaseConfig, tag="local"):
         root_path = Path(self.dataset_root)
         if not root_path.exists():
             raise ValueError(f"Local dataset root does not exist: {self.dataset_root}")
-        if not (root_path / ".fluxel").is_dir():
-            raise ValueError(
-                f"Not a fluxel repository (no .fluxel directory): {self.dataset_root}"
-            )
 
 
 class S3Config(BaseConfig, tag="s3"):

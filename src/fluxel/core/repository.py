@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -22,6 +22,7 @@ from .manifest_index import (
     load_manifest_index_from_data,
 )
 from .repository_store import (
+    BranchLockState,
     BranchRefState,
     LocalRepositoryStore,
     RepositoryStore,
@@ -50,111 +51,19 @@ from .storage import (
 from .storage import describe_source_uri
 
 
-@dataclass(frozen=True)
-class CommitObject:
-    id: str
-    message: str
-    manifest: str
-    parent: str | None
-    created_at: str
-    branch: str
-    manifest_index: ManifestIndex | None = None
-
-
-@dataclass(frozen=True)
-class DiffEntry:
-    path: str
-    change: str
-    before_hash: str | None
-    after_hash: str | None
-    before_size: int | None
-    after_size: int | None
-
-
-@dataclass(frozen=True)
-class VerifyResult:
-    commit_id: str
-    verified_entries: int
-    candidate_entries: int
-    total_entries: int
-    created_commit: bool
-    dry_run: bool
-
-
-@dataclass(frozen=True)
-class MergeResult:
-    source_ref: str
-    target_ref: str
-    commit_id: str
-    updated: bool
-
-
-@dataclass(frozen=True)
-class RemoveResult:
-    ref: str
-    commit_id: str
-    removed_paths: list[str]
-
-
-@dataclass(frozen=True)
-class MoveResult:
-    ref: str
-    commit_id: str
-    source_path: str
-    destination_path: str
-    moved_paths: list[str]
-
-
-class StageChange(msgspec.Struct):
-    path: str
-    action: str
-    identity_mode: str | None = None
-    source_uri: str | None = None
-    blob_hash: str | None = None
-    size: int | None = None
-
-
-@dataclass(frozen=True)
-class StageStatus:
-    ref: str
-    added: list[str]
-    removed: list[str]
-    modified: list[str] = ()
-    working_tree_added: list[str] = ()
-    working_tree_removed: list[str] = ()
-    working_tree_modified: list[str] = ()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "added", list(self.added))
-        object.__setattr__(self, "removed", list(self.removed))
-        object.__setattr__(self, "modified", list(self.modified))
-        object.__setattr__(self, "working_tree_added", list(self.working_tree_added))
-        object.__setattr__(
-            self, "working_tree_removed", list(self.working_tree_removed)
-        )
-        object.__setattr__(
-            self, "working_tree_modified", list(self.working_tree_modified)
-        )
-
-
-class RefConflictError(RuntimeError):
-    def __init__(
-        self,
-        *,
-        branch: str,
-        operation: str,
-        expected_commit_id: str | None,
-        current_commit_id: str | None,
-    ) -> None:
-        expected = expected_commit_id or "<empty>"
-        current = current_commit_id or "<empty>"
-        super().__init__(
-            f"Branch update conflict for '{branch}' during {operation}: expected {expected}, found {current}"
-        )
-        self.branch = branch
-        self.operation = operation
-        self.expected_commit_id = expected_commit_id
-        self.current_commit_id = current_commit_id
+from .domain import (
+    CommitObject,
+    DiffEntry,
+    FluxelError,
+    MergeResult,
+    MoveResult,
+    NonFastForwardError,
+    RefConflictError,
+    RemoveResult,
+    StageChange,
+    StageStatus,
+    VerifyResult,
+)
 
 
 class FluxelRepository:
@@ -259,7 +168,6 @@ class FluxelRepository:
         if not target_ref:
             raise ValueError("Target ref cannot be empty")
 
-        target_branch_state = self._require_branch_state(target_ref)
         source_commit = self.resolve_ref(source_ref)
         target_commit = self.resolve_ref(target_ref)
 
@@ -271,26 +179,58 @@ class FluxelRepository:
                 updated=False,
             )
 
-        if not self._is_ancestor(
-            ancestor_commit=target_commit, descendant_commit=source_commit
-        ):
-            raise ValueError(
-                f"Cannot fast-forward {target_ref} to {source_ref}: target is not an ancestor"
-            )
-
-        self._update_branch_ref(
-            branch=target_ref,
-            commit_id=source_commit,
-            expected_version_token=target_branch_state.version_token,
-            expected_commit_id=target_branch_state.commit_id,
-            operation="merge",
-        )
+        self.fast_forward_branch(target_ref, source_commit, operation="merge")
         return MergeResult(
             source_ref=source_ref,
             target_ref=target_ref,
             commit_id=source_commit,
             updated=True,
         )
+
+    # ── Lock inspection / cleanup ───────────────────────────────────────
+
+    def list_locks(self) -> dict[str, BranchLockState]:
+        """Return a mapping of branch → lock state for every active lock.
+
+        Only meaningful for S3-backed repositories; local stores always
+        return an empty dict.
+        """
+        from .repository_store import S3RepositoryStore
+
+        if isinstance(self.store, S3RepositoryStore):
+            return self.store.list_branch_locks()
+        return {}
+
+    def lock_info(self, branch: str) -> BranchLockState | None:
+        """Return the lock state for *branch*, or ``None`` if not locked."""
+        from .repository_store import S3RepositoryStore
+
+        if isinstance(self.store, S3RepositoryStore):
+            return self.store.branch_lock_info(branch)
+        return None
+
+    def force_release_lock(self, branch: str) -> bool:
+        """Force-release *branch*'s lock regardless of token ownership.
+
+        Returns ``True`` if a lock was removed, ``False`` if none existed.
+        Only meaningful for S3-backed repositories.
+        """
+        from .repository_store import S3RepositoryStore
+
+        if isinstance(self.store, S3RepositoryStore):
+            return self.store.force_release_branch_lock(branch)
+        return False
+
+    @property
+    def lock_timeout_seconds(self) -> int:
+        """The lock expiry timeout for this repository (S3-backed only)."""
+        from .repository_store import S3RepositoryStore
+
+        if isinstance(self.store, S3RepositoryStore):
+            return self.store.lock_timeout_seconds
+        return 0
+
+    # ── Core operations ─────────────────────────────────────────────────
 
     def commit(
         self,
@@ -308,6 +248,10 @@ class FluxelRepository:
 
         branch = self.current_branch()
         self._ensure_branch_exists(branch)
+        # Ref advancement is a mutation boundary: use the client-side
+        # snapshot as the expected state. If another client advanced
+        # the branch since our last interaction, the stale snapshot
+        # will cause a RefConflictError in _update_branch_ref.
         branch_state = self._require_branch_state(branch)
         parent_commit = branch_state.commit_id
 
@@ -424,16 +368,16 @@ class FluxelRepository:
             wf_path = wf.relative_path if wf else None
             pe_path = pe.path if pe else None
 
-            if pe is not None and _path_is_removed(pe_path, staged_removed_paths):
-                pe = next(parent_stream, None)
+            if pe is not None and _path_is_removed(pe_path, staged_removed_paths):  # type: ignore[arg-type]
+                pe = next(parent_stream, None)  # type: ignore[arg-type]
                 continue
 
             if pe is None:
-                yield self._entry_from_file_entry(wf, identity_mode, store_blob=True)
+                yield self._entry_from_file_entry(wf, identity_mode, store_blob=True)  # type: ignore[arg-type]
                 wf = next(worktree_iter, None)
             elif wf is None:
                 yield pe
-                pe = next(parent_stream, None)
+                pe = next(parent_stream, None)  # type: ignore[arg-type]
             elif wf_path == pe_path:
                 if self._entry_is_modified(wf, pe):
                     yield self._entry_from_file_entry(
@@ -442,13 +386,13 @@ class FluxelRepository:
                 else:
                     yield pe
                 wf = next(worktree_iter, None)
-                pe = next(parent_stream, None)
-            elif wf_path < pe_path:
+                pe = next(parent_stream, None)  # type: ignore[arg-type]
+            elif wf_path < pe_path:  # type: ignore[operator]
                 yield self._entry_from_file_entry(wf, identity_mode, store_blob=True)
                 wf = next(worktree_iter, None)
             else:
                 yield pe
-                pe = next(parent_stream, None)
+                pe = next(parent_stream, None)  # type: ignore[arg-type]
 
     @staticmethod
     def _entry_is_modified(
@@ -471,43 +415,15 @@ class FluxelRepository:
         path_patterns: list[str] | None = None,
         ref: str | None = None,
     ) -> str:
-        if not message.strip():
-            raise ValueError("Commit message cannot be empty")
-        if identity_mode not in {"blake3", "meta"}:
-            raise ValueError("identity_mode must be one of: blake3, meta")
-        branch = ref or self.current_branch()
-        branch_state = self._require_branch_state(branch)
-        parent_commit = branch_state.commit_id
+        from .repository_ops import repo_import_s3
 
-        parent_manifest: str | None = None
-        if parent_commit:
-            parent = self.read_commit(parent_commit)
-            parent_manifest = parent.manifest
-
-        temp_manifest = self._write_temp_manifest(
-            _merge_sorted_entry_streams(
-                base_entries=(
-                    self.store.iter_manifest_entries(parent_manifest)
-                    if parent_manifest
-                    else None
-                ),
-                new_entries=self._materialize_s3_entries(
-                    source_uri=source_uri,
-                    identity_mode=identity_mode,
-                    path_patterns=path_patterns,
-                ),
-            )
-        )
-        manifest_hash = blake3_digest_file(temp_manifest)
-        self._persist_manifest(temp_manifest, manifest_hash)
-
-        return self._write_commit_object(
-            branch=branch,
-            message=message,
-            parent_commit=parent_commit,
-            manifest_hash=manifest_hash,
-            expected_version_token=branch_state.version_token,
-            operation="commit",
+        return repo_import_s3(
+            self,
+            source_uri,
+            message,
+            identity_mode,
+            path_patterns=path_patterns,
+            ref=ref,
         )
 
     def add(
@@ -518,36 +434,20 @@ class FluxelRepository:
         identity_mode: str = "blake3",
         destination_path: str | None = None,
     ) -> StageStatus:
-        if identity_mode not in {"blake3", "meta"}:
-            raise ValueError("identity_mode must be one of: blake3, meta")
-        branch = ref or self.current_branch()
-        self._ensure_branch_exists(branch)
-        staged = self._load_stage(branch)
-        if destination_path is not None and len(paths) != 1:
-            raise ValueError("--as can only be used when staging exactly one source")
-        for raw_source in paths:
-            for logical_path, source_uri in self._expand_stage_source(
-                raw_source,
-                destination_path=destination_path,
-            ):
-                staged[logical_path] = StageChange(
-                    path=logical_path,
-                    action="add",
-                    identity_mode=identity_mode,
-                    source_uri=source_uri,
-                )
-        self._save_stage(branch, staged)
-        return self.status(ref=branch)
+        from .repository_ops import repo_add
+
+        return repo_add(
+            self,
+            paths,
+            ref=ref,
+            identity_mode=identity_mode,
+            destination_path=destination_path,
+        )
 
     def rm(self, paths: list[str], *, ref: str | None = None) -> StageStatus:
-        branch = ref or self.current_branch()
-        self._ensure_branch_exists(branch)
-        staged = self._load_stage(branch)
-        for path in paths:
-            normalized = normalize_repository_path(path)
-            staged[normalized] = StageChange(path=normalized, action="remove")
-        self._save_stage(branch, staged)
-        return self.status(ref=branch)
+        from .repository_ops import repo_rm
+
+        return repo_rm(self, paths, ref=ref)
 
     def remove_paths(
         self,
@@ -556,43 +456,9 @@ class FluxelRepository:
         *,
         ref: str | None = None,
     ) -> RemoveResult:
-        if not message.strip():
-            raise ValueError("Commit message cannot be empty")
-        branch = ref or self.current_branch()
-        branch_state = self._require_branch_state(branch)
-        base_commit = self._require_commit_for_metadata_mutation(branch_state.branch)
-        normalized_paths = normalize_logical_paths(paths)
-        removed_paths: set[str] = set()
+        from .repository_ops import repo_remove_paths
 
-        def iter_entries() -> Iterator[ManifestEntry]:
-            nonlocal removed_paths
-            for entry in self.store.iter_manifest_entries(base_commit.manifest):
-                if matches_any_logical_path(entry.path, normalized_paths):
-                    removed_paths.add(entry.path)
-                    continue
-                yield entry
-
-        temp_manifest = self._write_temp_manifest(iter_entries())
-        if not removed_paths:
-            temp_manifest.unlink(missing_ok=True)
-            missing = ", ".join(normalized_paths)
-            raise FileNotFoundError(f"Path not found in branch '{branch}': {missing}")
-
-        manifest_hash = blake3_digest_file(temp_manifest)
-        self._persist_manifest(temp_manifest, manifest_hash)
-        commit_id = self._write_commit_object(
-            branch=branch,
-            message=message,
-            parent_commit=branch_state.commit_id,
-            manifest_hash=manifest_hash,
-            expected_version_token=branch_state.version_token,
-            operation="rm",
-        )
-        return RemoveResult(
-            ref=branch,
-            commit_id=commit_id,
-            removed_paths=sorted(removed_paths),
-        )
+        return repo_remove_paths(self, paths, message, ref=ref)
 
     def move(
         self,
@@ -602,75 +468,9 @@ class FluxelRepository:
         *,
         ref: str | None = None,
     ) -> MoveResult:
-        if not message.strip():
-            raise ValueError("Commit message cannot be empty")
-        branch = ref or self.current_branch()
-        branch_state = self._require_branch_state(branch)
-        base_commit = self._require_commit_for_metadata_mutation(branch_state.branch)
-        source = normalize_repository_path(source_path)
-        destination = normalize_repository_path(destination_path)
+        from .repository_ops import repo_move
 
-        if source == destination:
-            raise ValueError("Source and destination paths must differ")
-        if destination.startswith(f"{source}/"):
-            raise ValueError("Cannot move a path into itself")
-
-        existing_paths: set[str] = set()
-        source_paths: list[str] = []
-        moved_paths: list[str] = []
-        path_map: dict[str, str] = {}
-        updated_entries: dict[str, ManifestEntry] = {}
-
-        for entry in self.store.iter_manifest_entries(base_commit.manifest):
-            existing_paths.add(entry.path)
-            if not matches_logical_path(entry.path, source):
-                updated_entries[entry.path] = entry
-                continue
-            moved_path = move_logical_path(
-                entry.path,
-                source_path=source,
-                destination_path=destination,
-            )
-            source_paths.append(entry.path)
-            moved_paths.append(moved_path)
-            path_map[entry.path] = moved_path
-            relocated_entry = relocate_manifest_entry(entry, moved_path)
-            updated_entries[relocated_entry.path] = relocated_entry
-
-        if not path_map:
-            raise FileNotFoundError(f"Path not found in branch '{branch}': {source}")
-        if len(set(moved_paths)) != len(moved_paths):
-            raise ValueError("Move would create duplicate logical paths")
-
-        source_path_set = set(source_paths)
-        for moved_path in moved_paths:
-            if moved_path in existing_paths and moved_path not in source_path_set:
-                raise ValueError(
-                    f"Destination already exists in branch '{branch}': {moved_path}"
-                )
-
-        def iter_entries() -> Iterator[ManifestEntry]:
-            for path in sorted(updated_entries):
-                yield updated_entries[path]
-
-        temp_manifest = self._write_temp_manifest(iter_entries())
-        manifest_hash = blake3_digest_file(temp_manifest)
-        self._persist_manifest(temp_manifest, manifest_hash)
-        commit_id = self._write_commit_object(
-            branch=branch,
-            message=message,
-            parent_commit=branch_state.commit_id,
-            manifest_hash=manifest_hash,
-            expected_version_token=branch_state.version_token,
-            operation="mv",
-        )
-        return MoveResult(
-            ref=branch,
-            commit_id=commit_id,
-            source_path=source,
-            destination_path=destination,
-            moved_paths=sorted(moved_paths),
-        )
+        return repo_move(self, source_path, destination_path, message, ref=ref)
 
     def status(
         self, *, ref: str | None = None, working_tree: bool = False
@@ -761,6 +561,7 @@ class FluxelRepository:
             parent=str(data["parent"]) if data["parent"] else None,
             created_at=str(data["created_at"]),
             branch=str(data["branch"]),
+            generation=int(data.get("generation", 0)),
             manifest_index=manifest_index,
         )
         self._commit_cache[commit_id] = commit
@@ -794,12 +595,12 @@ class FluxelRepository:
             if from_entry is None:
                 changes.append(
                     DiffEntry(
-                        path=to_entry.path,
+                        path=to_entry.path,  # type: ignore[union-attr]
                         change="added",
                         before_hash=None,
-                        after_hash=to_entry.hash,
+                        after_hash=to_entry.hash,  # type: ignore[union-attr]
                         before_size=None,
-                        after_size=to_entry.size,
+                        after_size=to_entry.size,  # type: ignore[union-attr]
                     )
                 )
                 to_entry = next(to_iter, None)
@@ -863,90 +664,9 @@ class FluxelRepository:
         *,
         dry_run: bool = False,
     ) -> VerifyResult:
-        if ref is None:
-            ref = self.current_branch()
-        branch_state = self._require_branch_state(ref)
+        from .repository_ops import repo_verify
 
-        base_commit_id = self.resolve_ref(ref)
-        base_commit = self.read_commit(base_commit_id)
-        normalized_prefixes = [
-            prefix.strip("/") for prefix in (path_prefixes or []) if prefix.strip("/")
-        ]
-
-        verified_entries = 0
-        candidate_entries = 0
-        total_entries = 0
-
-        def should_verify(entry_path: str) -> bool:
-            if not normalized_prefixes:
-                return True
-            return any(
-                entry_path == prefix or entry_path.startswith(f"{prefix}/")
-                for prefix in normalized_prefixes
-            )
-
-        def iter_verified_entries() -> Iterator[ManifestEntry]:
-            nonlocal verified_entries, candidate_entries, total_entries
-            for entry in self.store.iter_manifest_entries(base_commit.manifest):
-                total_entries += 1
-                if not should_verify(entry.path):
-                    yield entry
-                    continue
-                if entry.blob_hash:
-                    yield entry
-                    continue
-                candidate_entries += 1
-                if dry_run:
-                    yield entry
-                    continue
-                if not entry.source_uri:
-                    raise FileNotFoundError(
-                        f"Cannot verify '{entry.path}' because source_uri is missing"
-                    )
-                digest = self._store_blob_from_source_uri(entry.source_uri)
-                verified_entries += 1
-                yield ManifestEntry(
-                    path=entry.path,
-                    hash=digest,
-                    size=entry.size,
-                    mtime_ns=entry.mtime_ns,
-                    identity_mode="blake3",
-                    identity_value=digest,
-                    blob_hash=digest,
-                    source_uri=entry.source_uri,
-                )
-
-        temp_manifest = self._write_temp_manifest(iter_verified_entries())
-        if verified_entries == 0:
-            temp_manifest.unlink(missing_ok=True)
-            return VerifyResult(
-                commit_id=base_commit_id,
-                verified_entries=0,
-                candidate_entries=candidate_entries,
-                total_entries=total_entries,
-                created_commit=False,
-                dry_run=dry_run,
-            )
-
-        manifest_hash = blake3_digest_file(temp_manifest)
-        self._persist_manifest(temp_manifest, manifest_hash)
-
-        commit_id = self._write_commit_object(
-            branch=ref,
-            message=f"verify {ref}",
-            parent_commit=base_commit_id,
-            manifest_hash=manifest_hash,
-            expected_version_token=branch_state.version_token,
-            operation="verify",
-        )
-        return VerifyResult(
-            commit_id=commit_id,
-            verified_entries=verified_entries,
-            candidate_entries=candidate_entries,
-            total_entries=total_entries,
-            created_commit=True,
-            dry_run=dry_run,
-        )
+        return repo_verify(self, ref, path_prefixes, dry_run=dry_run)
 
     def _manifest_index(self, manifest_hash: str) -> dict[str, ManifestEntry]:
         index: dict[str, ManifestEntry] = {}
@@ -1381,12 +1101,48 @@ class FluxelRepository:
         return branch_ref.commit_id
 
     def _is_ancestor(self, *, ancestor_commit: str, descendant_commit: str) -> bool:
+        ancestor = self.read_commit(ancestor_commit)
+        descendant = self.read_commit(descendant_commit)
+        if descendant.generation < ancestor.generation:
+            return False
+        if descendant.generation == ancestor.generation:
+            return descendant_commit == ancestor_commit
         current_commit: str | None = descendant_commit
         while current_commit:
             if current_commit == ancestor_commit:
                 return True
             current_commit = self.read_commit(current_commit).parent
         return False
+
+    def fast_forward_branch(
+        self,
+        branch: str,
+        target_commit: str,
+        *,
+        operation: str,
+    ) -> bool:
+        """Advance a branch only if its current head is an ancestor of target."""
+        branch_state = self._require_branch_state(branch)
+        current_commit = branch_state.commit_id
+        if current_commit == target_commit:
+            return False
+        if current_commit and not self._is_ancestor(
+            ancestor_commit=current_commit,
+            descendant_commit=target_commit,
+        ):
+            raise NonFastForwardError(
+                branch=branch,
+                current_commit=current_commit,
+                target_commit=target_commit,
+            )
+        self._update_branch_ref(
+            branch=branch,
+            commit_id=target_commit,
+            expected_version_token=branch_state.version_token,
+            expected_commit_id=current_commit,
+            operation=operation,
+        )
+        return True
 
     def _write_commit_object(
         self,
@@ -1398,12 +1154,17 @@ class FluxelRepository:
         expected_version_token: str | None,
         operation: str,
     ) -> str:
+        generation = 0
+        if parent_commit:
+            parent_obj = self.read_commit(parent_commit)
+            generation = parent_obj.generation + 1
         commit_body: dict[str, object] = {
             "message": message,
             "manifest": manifest_hash,
             "parent": parent_commit,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "branch": branch,
+            "generation": generation,
         }
         manifest_index = self._last_manifest_index
         if manifest_index is not None:
@@ -1423,6 +1184,7 @@ class FluxelRepository:
             parent=parent_commit,
             created_at=str(commit_body["created_at"]),
             branch=branch,
+            generation=generation,
             manifest_index=manifest_index,
         )
         self._commit_cache[commit_id] = commit_object
@@ -1476,38 +1238,9 @@ class FluxelRepository:
         *,
         force: bool = False,
     ) -> list[str]:
-        commit_id = self.resolve_ref(ref)
-        commit = self.read_commit(commit_id)
+        from .repository_ops import repo_restore_files
 
-        if paths:
-            entries: dict[str, ManifestEntry] = {}
-            for p in paths:
-                entry = self.store.lookup_manifest_entry(
-                    commit.manifest, p, manifest_index=commit.manifest_index
-                )
-                if entry is not None:
-                    entries[p] = entry
-        else:
-            entries = {
-                entry.path: entry
-                for entry in self.store.iter_manifest_entries(commit.manifest)
-            }
-
-        restored: list[str] = []
-        for logical_path, entry in sorted(entries.items()):
-            target = self.root / logical_path
-            if target.exists() and not force:
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if entry.blob_hash:
-                target.write_bytes(self.read_blob(entry.blob_hash))
-                restored.append(logical_path)
-            elif entry.source_uri:
-                source_file = next(open_source_uri(entry.source_uri))
-                with source_file:
-                    target.write_bytes(source_file.read())
-                restored.append(logical_path)
-        return restored
+        return repo_restore_files(self, ref, paths, force=force)
 
     def generate_transfer_commands(
         self,
@@ -1516,60 +1249,14 @@ class FluxelRepository:
         mode: str = "upload",
         include_metadata: bool = False,
     ) -> list[str]:
-        config = BaseConfig.load(self.root)
-        if not isinstance(config, S3Config):
-            raise ValueError("S3 backend not configured in repo config")
-        bucket = config.bucket
+        from .repository_ops import repo_generate_transfer_commands
 
-        branch = ref or self.current_branch()
-        commit_id = self.resolve_ref(branch)
-        commit = self.read_commit(commit_id)
-        s3_prefix = config.prefix or ""
-
-        local_store = LocalRepositoryStore(self.root)
-        commands: list[str] = []
-        seen: set[str] = set()
-
-        for entry in local_store.iter_manifest_entries(commit.manifest):
-            if entry.blob_hash and entry.blob_hash not in seen:
-                seen.add(entry.blob_hash)
-                rel = blob_relpath(entry.blob_hash).as_posix()
-                s3_key = f"blobs/{rel}"
-                if s3_prefix:
-                    s3_key = f"{s3_prefix}/{s3_key}"
-                s3_uri = f"s3://{bucket}/{s3_key}"
-                local = str(self.layout.blobs_dir / rel)
-                if mode == "upload":
-                    commands.append(f"cp {local} {s3_uri}")
-                else:
-                    commands.append(f"cp {s3_uri} {local}")
-
-        if include_metadata:
-            for manifest_hash, extension in [
-                (commit.manifest, "jsonl"),
-                (commit.manifest, "idx"),
-            ]:
-                s3_key = f"manifests/{manifest_hash}.{extension}"
-                if s3_prefix:
-                    s3_key = f"{s3_prefix}/{s3_key}"
-                s3_uri = f"s3://{bucket}/{s3_key}"
-                local = str(self.layout.manifests_dir / f"{manifest_hash}.{extension}")
-                if mode == "upload":
-                    commands.append(f"cp {local} {s3_uri}")
-                else:
-                    commands.append(f"cp {s3_uri} {local}")
-
-            commit_s3_key = f"commits/{commit_id}.json"
-            if s3_prefix:
-                commit_s3_key = f"{s3_prefix}/{commit_s3_key}"
-            commit_s3_uri = f"s3://{bucket}/{commit_s3_key}"
-            commit_local = str(self.layout.commits_dir / f"{commit_id}.json")
-            if mode == "upload":
-                commands.append(f"cp {commit_local} {commit_s3_uri}")
-            else:
-                commands.append(f"cp {commit_s3_uri} {commit_local}")
-
-        return commands
+        return repo_generate_transfer_commands(
+            self,
+            ref,
+            mode=mode,
+            include_metadata=include_metadata,
+        )
 
     def _persist_manifest(self, temp_manifest: Path, manifest_hash: str) -> None:
         temp_index = self._write_temp_manifest_index(temp_manifest)
@@ -1678,7 +1365,7 @@ def _path_is_removed(path: str, removed: set[str]) -> bool:
 def _merge_sorted_entry_streams(
     base_entries: Iterator[ManifestEntry] | None,
     new_entries: Iterator[ManifestEntry],
-    removed_paths: set[str] = frozenset(),
+    removed_paths: set[str] = set(),
 ) -> Iterator[ManifestEntry]:
     """Merge two sorted entry streams without loading either fully in memory.
 
@@ -1697,7 +1384,7 @@ def _merge_sorted_entry_streams(
 
     while base is not None or new is not None:
         if base is None:
-            yield new
+            yield new  # type: ignore[misc]
             new = next(new_entries, None)
         elif new is None:
             if not _path_is_removed(base.path, removed_paths):
@@ -1717,6 +1404,18 @@ def _merge_sorted_entry_streams(
             if new.path not in removed_paths:
                 yield new
             new = next(new_entries, None)
+
+
+def _find_repo_root(start: str | Path) -> Path:
+    """Walk up from start looking for a .fluxel directory."""
+    current = Path(start).resolve()
+    while True:
+        if (current / ".fluxel").is_dir():
+            return current
+        parent = current.parent
+        if parent == current:
+            return Path(start).resolve()
+        current = parent
 
 
 def open_repository(
@@ -1750,6 +1449,12 @@ def open_repository(
             client_state=LocalClientState(resolved_client_root),
         )
 
+    if root == "." or str(root) == ".":
+        cwd = Path(".").resolve()
+        if not (cwd / ".fluxel").is_dir():
+            root = _find_repo_root(".")
+        else:
+            root = str(cwd)
     repo_root = Path(root).resolve()
     config = BaseConfig.load(repo_root)
 
@@ -1803,7 +1508,7 @@ def import_s3(
     root: str | Path,
     source_uri: str,
     message: str,
-    identity_mode: str = "blake3",
+    identity_mode: Literal["blake3", "meta"] = "blake3",
     *,
     path_patterns: list[str] | None = None,
     ref: str | None = None,
@@ -1881,53 +1586,11 @@ def move_staged(
     ref: str | None = None,
 ) -> StageStatus:
     """Stage a move operation without committing."""
-    repo = open_repository(root)
-    branch = ref or repo.current_branch()
-    repo._ensure_branch_exists(branch)
-    stage = repo._load_stage(branch)
+    from .repository_ops import repo_move_staged
 
-    source = normalize_repository_path(source_path)
-    destination = normalize_repository_path(destination_path)
-
-    if source == destination:
-        raise ValueError("Source and destination paths must differ")
-
-    # Find all entries matching the source path in the current manifest
-    base_commit = repo.read_commit(repo.resolve_ref(branch))
-    moved_count = 0
-
-    for entry in repo.store.iter_manifest_entries(base_commit.manifest):
-        if not matches_logical_path(entry.path, source):
-            continue
-
-        moved_path = move_logical_path(
-            entry.path,
-            source_path=source,
-            destination_path=destination,
-        )
-
-        # Stage the remove + add as separate operations
-        stage[entry.path] = StageChange(
-            path=entry.path,
-            action="remove",
-            identity_mode=None,
-            source_uri=None,
-        )
-        stage[moved_path] = StageChange(
-            path=moved_path,
-            action="add",
-            identity_mode=entry.identity_mode,
-            source_uri=entry.source_uri,
-            blob_hash=entry.blob_hash,
-            size=entry.size,
-        )
-        moved_count += 1
-
-    if moved_count == 0:
-        raise FileNotFoundError(f"Path not found in branch '{branch}': {source}")
-
-    repo._save_stage(branch, stage)
-    return repo.status(ref=branch)
+    return repo_move_staged(
+        open_repository(root), source_path, destination_path, ref=ref
+    )
 
 
 def status(

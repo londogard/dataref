@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from .repository_store import BranchRefState
+from .domain import BranchRefState
 
 
 HEAD_FILE = "HEAD"

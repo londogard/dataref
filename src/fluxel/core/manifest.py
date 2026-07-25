@@ -10,7 +10,6 @@ from typing import Callable, Iterable, Iterator
 
 from .hashing import blake3_digest_file
 
-
 SUPPORTED_IDENTITY_MODES = frozenset({"blake3", "meta"})
 _BLAKE3_HEX_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -98,6 +97,17 @@ class ManifestEntry:
         elif self.blob_hash is not None and self.blob_hash != self.hash:
             raise ValueError("Blob-backed manifest entries must keep blob_hash aligned")
 
+    @property
+    def is_verified(self) -> bool:
+        """True when the entry is backed by a canonical content blob.
+
+        Metadata-only entries (``identity_mode == "meta"``) are *unverifiable*:
+        their identity is derived from path and size, not from content bytes.
+        Use ``fluxel verify`` to read the source blob, compute a Blake3 hash,
+        and promote the entry to ``blake3`` mode.
+        """
+        return self.identity_mode == "blake3"
+
     def serialize(self) -> str:
         if self.identity_mode == "blake3":
             payload: list[object] = [
@@ -157,48 +167,8 @@ class ManifestEntry:
 
         try:
             path = str(data["path"])
-            size = int(data["size"])
-            mtime_ns = int(data["mtime_ns"])
-        except KeyError as error:
-            raise ValueError(
-                f"Manifest entry is missing required field: {error.args[0]}"
-            ) from error
-        except (TypeError, ValueError) as error:
-            raise ValueError(
-                "Manifest entry size and mtime_ns must be integers"
-            ) from error
-
-        return ManifestEntry(
-            path=path,
-            hash=hash_value,
-            size=size,
-            mtime_ns=mtime_ns,
-            identity_mode=identity_mode,
-            identity_value=(
-                str(identity_value) if identity_value is not None else hash_value
-            ),
-            blob_hash=str(blob_hash) if blob_hash is not None else None,
-            source_uri=str(source_uri) if source_uri is not None else None,
-        )
-
-
-def serialize_manifest_entry(entry: ManifestEntry) -> str:
-        if not isinstance(data, dict):
-            raise ValueError("Manifest entry payload must be an object")
-        hash_value = str(data.get("hash") or data.get("identity_value") or "")
-        if not hash_value:
-            raise ValueError("Manifest entry must include hash or identity_value")
-        identity_mode = str(data.get("identity_mode") or "blake3")
-        identity_value = data.get("identity_value")
-        blob_hash = data.get("blob_hash")
-        if blob_hash is None and "blob_hash" not in data and identity_mode == "blake3":
-            blob_hash = hash_value
-        source_uri = data.get("source_uri")
-
-        try:
-            path = str(data["path"])
-            size = int(data["size"])
-            mtime_ns = int(data["mtime_ns"])
+            size = int(data["size"])  # type: ignore[arg-type]
+            mtime_ns = int(data["mtime_ns"])  # type: ignore[arg-type]
         except KeyError as error:
             raise ValueError(
                 f"Manifest entry is missing required field: {error.args[0]}"
@@ -267,20 +237,25 @@ def _manifest_entry_path_for_index(payload_text: str) -> str:
 
 
 class ManifestWriter:
-    def __init__(self, manifest_path: str | Path, *, block_entry_count: int = 0) -> None:
+    def __init__(
+        self, manifest_path: str | Path, *, block_entry_count: int = 0
+    ) -> None:
         self.manifest_path = Path(manifest_path)
         self.block_entry_count = block_entry_count
         self._blocks: list[tuple[str, int]] = []
         self._entry_count = 0
         self._manifest_size = 0
 
-    def write_entries(self, entries: Iterable[ManifestEntry | str | tuple[str, str]]) -> int:
+    def write_entries(
+        self, entries: Iterable[ManifestEntry | str | tuple[str, str]]
+    ) -> int:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         written = 0
         offset = 0
         previous_path: str | None = None
         with self.manifest_path.open("wb") as handle:
             for entry in entries:
+                path = ""
                 if isinstance(entry, tuple):
                     path, payload = entry
                     line = payload.encode("utf-8")
@@ -359,6 +334,7 @@ class ManifestReader:
                     raise ValueError(
                         f"Invalid manifest entry at line {line_number} in {self.manifest_path}: {error}"
                     ) from error
+
 
 def build_manifest_entries(
     files: Iterable[str | Path],

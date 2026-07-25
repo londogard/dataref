@@ -1,0 +1,115 @@
+name: CI
+
+on:
+    push:
+    pull_request:
+
+jobs:
+    test-and-build:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+
+            - name: Set up uv
+              uses: astral-sh/setup-uv@v4
+
+            - name: Install dependencies
+              run: uv sync --group dev
+
+            - name: Reject macOS junk files
+              run: |
+                  if git ls-files | grep -E '(^__MACOSX/|(^|/)\.DS_Store$|(^|/)\._)'; then
+                    echo "Remove macOS archive/junk files before merging."
+                    exit 1
+                  fi
+
+            - name: Run non-integration tests
+              run: uv run pytest tests -m "not integration"
+
+            - name: Smoke-test CLI help
+              run: uv run fluxel --help
+
+            - name: Build package
+              run: uv build
+
+            - name: Clean-tree check
+              run: |
+                  if [ -n "$(git status --porcelain)" ]; then
+                    echo "Working tree is dirty after build:"
+                    git status
+                    git diff
+                    exit 1
+                  fi
+
+            - name: Upload wheel artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: wheel
+                  path: dist/*.whl
+                  if-no-files-found: error
+
+    s3-integration:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+
+            - name: Set up uv
+              uses: astral-sh/setup-uv@v4
+
+            - name: Install dependencies
+              run: uv sync --group dev
+
+            - name: Run S3 integration tests against MiniStack
+              run: bash scripts/run_s3_integration.sh
+
+    isolated-install-smoke:
+        needs: [test-and-build]
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+
+            - name: Download wheel artifact
+              uses: actions/download-artifact@v4
+              with:
+                  name: wheel
+                  path: dist
+
+            - name: Isolated install and smoke
+              run: |
+                  set -euo pipefail
+                  WHEEL=$(ls dist/*.whl | head -1)
+                  python -m venv /tmp/smoke-venv
+                  /tmp/smoke-venv/bin/pip install "$WHEEL"
+                  echo "=== fluxel --help ==="
+                  /tmp/smoke-venv/bin/fluxel --help
+                  echo "=== fluxel --version ==="
+                  /tmp/smoke-venv/bin/fluxel --version 2>/dev/null || true
+                  echo "=== basic commit smoke ==="
+                  TMPDIR=$(mktemp -d)
+                  echo "smoke-test-content" > "$TMPDIR/smoke.txt"
+                  /tmp/smoke-venv/bin/fluxel commit --repo "$TMPDIR" -m "smoke" > /dev/null
+                  echo "Isolated install smoke test passed."
+
+    release-gate:
+        needs: [test-and-build, s3-integration, isolated-install-smoke]
+        runs-on: ubuntu-latest
+        steps:
+            - run: echo "All release gates passed."

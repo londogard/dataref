@@ -265,10 +265,17 @@ class TestFluxelFileSystemDatasetRoot:
         root = fs._dataset_root("safe")
         assert root == Path("/tmp").resolve()
 
-    def test_simple_dataset_falls_back_to_cwd(self) -> None:
+    def test_unknown_dataset_raises(self) -> None:
         fs = FluxelFileSystem()
-        root = fs._dataset_root("nonexistent_dataset_name_for_testing")
-        assert root == Path.cwd().resolve()
+        with pytest.raises(FileNotFoundError, match="Unknown Fluxel dataset"):
+            fs._dataset_root("nonexistent_dataset_name_for_testing")
+
+    def test_unregistered_cwd_folder_dataset_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        (tmp_path / "my_local_folder").mkdir()
+        monkeypatch.chdir(tmp_path)
+        fs = FluxelFileSystem()
+        with pytest.raises(FileNotFoundError, match="Unknown Fluxel dataset"):
+            fs._dataset_root("my_local_folder")
 
     def test_dataset_with_slash_raises(self) -> None:
         fs = FluxelFileSystem()

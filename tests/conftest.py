@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 from datetime import datetime, timezone
+from typing import Any, Generator
 from uuid import uuid4
 
 import boto3
@@ -26,7 +27,7 @@ class FakeStreamingBody:
 
 
 class FakeS3Paginator:
-    def __init__(self, objects: dict[str, dict[str, object]]) -> None:
+    def __init__(self, objects: dict[str, dict[str, Any]]) -> None:
         self._objects = objects
 
     def paginate(self, *, Bucket: str, Prefix: str) -> list[dict[str, object]]:
@@ -45,7 +46,7 @@ class FakeS3Paginator:
 
 
 class FakeS3Client:
-    def __init__(self, objects: dict[str, dict[str, object]]) -> None:
+    def __init__(self, objects: dict[str, dict[str, Any]]) -> None:
         self._objects = objects
         self.fixed_etag: str | None = None
 
@@ -92,7 +93,7 @@ class FakeS3Client:
 
         payload = Body.read() if hasattr(Body, "read") else Body
         if not isinstance(payload, bytes):
-            payload = bytes(payload)
+            payload = bytes(payload)  # type: ignore[bad-argument-type]
         self._objects[Key] = {
             "Body": payload,
             "LastModified": datetime.now(timezone.utc),
@@ -198,7 +199,7 @@ def ministack_client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
-def s3_repo_root(ministack_client) -> str:
+def s3_repo_root(ministack_client) -> Generator[str, None, None]:
     bucket = f"fluxel-it-{uuid4().hex[:20]}"
     prefix = f"repos/{uuid4().hex}"
     ministack_client.create_bucket(Bucket=bucket)

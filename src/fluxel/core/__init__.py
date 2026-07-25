@@ -1,9 +1,30 @@
 from .client_state import LocalClientState
 from .config import BaseConfig, FluxelConfig, LocalConfig, S3Config, init_config
+from .domain import (
+    DEFAULT_BRANCH_LOCK_TIMEOUT_SECONDS,
+    AnalyticalIndexPaths,
+    BranchLockState,
+    BranchRefState,
+    CommitObject,
+    DiffEntry,
+    FetchResult,
+    FluxelError,
+    MergeResult,
+    MoveResult,
+    NonFastForwardError,
+    OptimisticLockError,
+    PullResult,
+    PushResult,
+    RefConflictError,
+    RemoveResult,
+    RepositoryObjectKind,
+    StageChange,
+    StageStatus,
+    VerifyResult,
+)
 from .filesystem import FluxelFileSystem, FluxelURI
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file, blake3_digest_stream
 from .index import (
-    AnalyticalIndexPaths,
     build_analytical_index,
     drop_analytical_index,
     query_analytical_index,
@@ -18,20 +39,13 @@ from .manifest import (
     walk_files,
 )
 from .repository_store import (
-    BranchRefState,
     LocalRepositoryStore,
     RepositoryStore,
     S3RepositoryStore,
 )
 from .repository import (
-    CommitObject,
-    DiffEntry,
     FluxelRepository,
-    MergeResult,
     open_repository,
-    RefConflictError,
-    StageChange,
-    StageStatus,
     add,
     branch,
     commit,
@@ -60,6 +74,15 @@ from .storage import (
     open_source_uri,
     parse_s3_uri,
 )
+from .repository_sync import (
+    FetchResult,
+    PullResult,
+    PushResult,
+    fetch,
+    pull,
+    push,
+)
+
 
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
@@ -75,7 +98,9 @@ __all__ = [
     "DiffEntry",
     "FluxelFileSystem",
     "FluxelRepository",
+    "FluxelError",
     "MergeResult",
+    "NonFastForwardError",
     "open_repository",
     "RefConflictError",
     "S3BlobTransferBackend",
@@ -85,6 +110,7 @@ __all__ = [
     "FluxelURI",
     "FluxelLayout",
     "FileEntry",
+    "BranchLockState",
     "BranchRefState",
     "LocalRepositoryStore",
     "LocalStorageBackend",
@@ -111,6 +137,12 @@ __all__ = [
     "merge",
     "move_staged",
     "rm",
+    "FetchResult",
+    "PullResult",
+    "PushResult",
+    "fetch",
+    "pull",
+    "push",
     "status",
     "verify",
     "log",

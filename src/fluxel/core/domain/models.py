@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
+
+import msgspec
+
+RepositoryObjectKind = Literal["blob", "commit", "manifest", "manifest-index", "ref"]
+DEFAULT_BRANCH_LOCK_TIMEOUT_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class BranchRefState:
+    branch: str
+    commit_id: str | None
+    version_token: str | None
+
+
+@dataclass(frozen=True)
+class BranchLockState:
+    token: str
+    expires_at: datetime | None
+    last_modified: datetime | None
+
+
+@dataclass(frozen=True)
+class CommitObject:
+    id: str
+    message: str
+    manifest: str
+    parent: str | None
+    created_at: str
+    branch: str
+    generation: int = 0
+    manifest_index: Any | None = None
+
+
+@dataclass(frozen=True)
+class DiffEntry:
+    path: str
+    change: str
+    before_hash: str | None
+    after_hash: str | None
+    before_size: int | None
+    after_size: int | None
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    commit_id: str
+    verified_entries: int
+    candidate_entries: int
+    total_entries: int
+    created_commit: bool
+    dry_run: bool
+
+
+@dataclass(frozen=True)
+class MergeResult:
+    source_ref: str
+    target_ref: str
+    commit_id: str
+    updated: bool
+
+
+@dataclass(frozen=True)
+class RemoveResult:
+    ref: str
+    commit_id: str
+    removed_paths: list[str]
+
+
+@dataclass(frozen=True)
+class MoveResult:
+    ref: str
+    commit_id: str
+    source_path: str
+    destination_path: str
+    moved_paths: list[str]
+
+
+class StageChange(msgspec.Struct):
+    path: str
+    action: str
+    identity_mode: str | None = None
+    source_uri: str | None = None
+    blob_hash: str | None = None
+    size: int | None = None
+
+
+@dataclass(frozen=True)
+class StageStatus:
+    ref: str
+    added: list[str]
+    removed: list[str]
+    modified: list[str] = field(default_factory=list)
+    working_tree_added: list[str] = field(default_factory=list)
+    working_tree_removed: list[str] = field(default_factory=list)
+    working_tree_modified: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "added", list(self.added))
+        object.__setattr__(self, "removed", list(self.removed))
+        object.__setattr__(self, "modified", list(self.modified))
+        object.__setattr__(self, "working_tree_added", list(self.working_tree_added))
+        object.__setattr__(
+            self, "working_tree_removed", list(self.working_tree_removed)
+        )
+        object.__setattr__(
+            self, "working_tree_modified", list(self.working_tree_modified)
+        )
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    remote_uri: str
+    branch: str
+    fetched_commits: int
+    fetched_blobs: int
+
+
+@dataclass(frozen=True)
+class PushResult:
+    source_branch: str
+    remote_uri: str
+    pushed_commits: int
+    pushed_blobs: int
+    updated: bool
+
+
+@dataclass(frozen=True)
+class PullResult:
+    source_branch: str
+    remote_uri: str
+    pulled_commits: int
+    pulled_blobs: int
+    updated: bool
+
+
+@dataclass(frozen=True)
+class AnalyticalIndexPaths:
+    db_path: Path
+    parquet_dir: Path | None

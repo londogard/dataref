@@ -34,6 +34,8 @@ Fluxel is intentionally in MVP mode.
 - Commit snapshots over a dataset root (`fluxel commit`).
 - Repository URI support via `--repo <path|s3://bucket/prefix>` and `open_repository(...)`.
 - Repository initialization (`fluxel init`) with local or S3 backend.
+- Remote sync workflow (`fluxel fetch`, `fluxel pull`, `fluxel push`).
+- Operator-facing S3 lock inspection and cleanup (`fluxel lock list`, `fluxel lock cleanup`).
 - Streaming S3 imports (`fluxel import`) with `blake3` or metadata identity modes.
 - Branch-scoped staging workflow (`fluxel add`, `fluxel rm`, `fluxel status`, `fluxel commit --staged`).
 - Incremental ingress paths that preserve existing manifest entries while adding only new content metadata/blobs.
@@ -48,11 +50,6 @@ Fluxel is intentionally in MVP mode.
 - `fsspec` provider for `fluxel://` URI reads.
 - Local + S3 storage backend abstractions available in code.
 - Human-readable output by default; `--json` flag on all commands for programmatic use.
-
-### Not Wired Yet
-
-- No remote sync CLI (`push/pull/fetch`) yet.
-- No operator-facing S3 lock inspection or cleanup command.
 
 ## Technical Stack
 
@@ -184,6 +181,36 @@ In `--identity meta` snapshots, Fluxel reads from `source_uri` when no canonical
 	- Stores no canonical blob (`blob_hash=null`) and keeps `source_uri` for reads.
 
 This is useful for large bootstrap imports where strong content verification can be deferred.
+
+### Durability contract for `--identity meta`
+
+Metadata-only (`--identity meta`) revisions are **unverifiable**: the entry's
+identity is derived from path and size, not from content bytes. Until you run
+`fluxel verify`, Fluxel cannot prove that the content at `source_uri` matches
+what was originally imported.
+
+**Warnings.** The CLI emits a warning to stderr whenever you stage or commit
+with `--identity meta`, and after `verify` reports how many unverifiable entries
+remain.
+
+**Source-retention policy.** Because metadata-only entries have no canonical
+blob, you **must** retain the source objects at their original `source_uri`
+until the entry has been promoted via `fluxel verify`. If a source object is
+deleted, overwritten, or moved before verification, the corresponding manifest
+entry becomes irrecoverable — no content can be read and no hash can be
+validated.
+
+**Promotion to verifiable.** Run `fluxel verify` to read every metadata-only
+entry's source blob, compute a Blake3 content hash, store the canonical blob,
+and rewrite the manifest entry in `blake3` mode. After promotion the source
+retention requirement is lifted for those entries.
+
+**Lifecycle summary:**
+
+| State | `identity_mode` | `blob_hash` | Can read? | Can prove integrity? | Source required? |
+|---|---|---|---|---|---|
+| Metadata-only | `meta` | `null` | ✅ (from `source_uri`) | ❌ | ✅ |
+| Verified | `blake3` | hash | ✅ (from `blobs/`) | ✅ | ❌ |
 
 ## Verify Command
 

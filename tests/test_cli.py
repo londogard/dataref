@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import io
 import json
 import shutil
@@ -1076,7 +1078,7 @@ def test_blob_stream_large_file_via_filesystem(tmp_path: Path) -> None:
     position = [0]
 
     class TrackingReadFile:
-        def __init__(self, inner: object) -> None:
+        def __init__(self, inner: Any) -> None:
             self._inner = inner
 
         def read(self, size: int = -1) -> bytes:

@@ -148,6 +148,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+.pyrefly_cache/
 
 # pytype static type analyzer
 .pytype/

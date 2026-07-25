@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import Any, BinaryIO, IO, Iterator
 
 import fsspec
 from fsspec.spec import AbstractFileSystem
@@ -41,13 +41,13 @@ class FluxelFileSystem(AbstractFileSystem):
     def _strip_protocol(cls, path: str) -> str:
         return path[len("fluxel://") :] if path.startswith("fluxel://") else path
 
-    def _open(
+    def _open(  # type: ignore[bad-override]
         self,
         path: str,
         mode: str = "rb",
         block_size: int | None = None,
         **kwargs: object,
-    ) -> BinaryIO:
+    ) -> IO[bytes]:
         if mode != "rb":
             raise NotImplementedError(
                 "FluxelFileSystem currently supports read-only binary mode"
@@ -55,9 +55,9 @@ class FluxelFileSystem(AbstractFileSystem):
         resolved = self._resolve_entry(path)
         if resolved.entry.blob_hash:
             repo = self._repository(resolved.root)
-            return _BlobReadFile(repo.open_blob_stream(resolved.entry.blob_hash))
+            return _BlobReadFile(repo.open_blob_stream(resolved.entry.blob_hash))  # type: ignore[bad-return]
         if resolved.entry.source_uri:
-            return _SourceURIFile(open_source_uri(resolved.entry.source_uri))
+            return _SourceURIFile(open_source_uri(resolved.entry.source_uri))  # type: ignore[bad-return]
         raise FileNotFoundError(
             "Entry has no canonical blob hash and no readable source URI"
         )
@@ -85,7 +85,7 @@ class FluxelFileSystem(AbstractFileSystem):
 
     def ls(
         self, path: str, detail: bool = True, **kwargs: object
-    ) -> list[dict[str, object]] | list[str]:
+    ) -> list[dict[str, object] | str]:
         uri = self._parse_uri(path, allow_empty_path=True)
         root = self._dataset_root(uri.dataset)
         repo = self._repository(root)
@@ -143,10 +143,7 @@ class FluxelFileSystem(AbstractFileSystem):
         _validate_uri_component(dataset, "dataset")
         if "/" in dataset or dataset in (".", ".."):
             raise ValueError("Fluxel URI dataset cannot contain path separators")
-        candidate = Path.cwd() / dataset
-        if candidate.exists():
-            return candidate.resolve()
-        return Path.cwd().resolve()
+        raise FileNotFoundError(f"Unknown Fluxel dataset: {dataset}")
 
     def _parse_uri(self, path: str, *, allow_empty_path: bool = False) -> FluxelURI:
         stripped = self._strip_protocol(path)
@@ -206,7 +203,7 @@ class ResolvedEntry:
 
 
 class _SourceURIFile(io.IOBase):
-    def __init__(self, context_manager: object) -> None:
+    def __init__(self, context_manager: Any) -> None:
         self._context_manager = context_manager
         self._handle = context_manager.__enter__()
 
