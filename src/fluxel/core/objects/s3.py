@@ -225,9 +225,10 @@ class S3ObjectStore:
         current_version = current.version_token if current else None
         if current_version != expected_version_token:
             return False
-        current_commit_id = current.commit_id if current else None
-        if current_commit_id != expected_commit_id:
-            return False
+        if expected_commit_id is not None:
+            current_commit_id = current.commit_id if current else None
+            if current_commit_id != expected_commit_id:
+                return False
 
         try:
             if expected_version_token is None:

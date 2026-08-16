@@ -130,10 +130,11 @@ class LocalObjectStore:
         current_token = self.version_token("ref", branch)
         if current_token != expected_version_token:
             return False
-        current_state = self.read_branch_ref(branch)
-        current_commit_id = current_state.commit_id if current_state else None
-        if current_commit_id != expected_commit_id:
-            return False
+        if expected_commit_id is not None:
+            current_state = self.read_branch_ref(branch)
+            current_commit_id = current_state.commit_id if current_state else None
+            if current_commit_id != expected_commit_id:
+                return False
         self.write_branch_ref(branch, commit_id)
         return True
 

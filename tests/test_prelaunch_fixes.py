@@ -62,9 +62,12 @@ def test_s3_atomic_cas_conditional_write(fake_s3_installer) -> None:
     assert updated_state.commit_id == "2" * 64
 
 
-def test_vfs_s3_dataset_roots(fake_s3_installer, tmp_path: Path) -> None:
+def test_vfs_s3_dataset_roots(
+    fake_s3_installer, tmp_path: Path, monkeypatch
+) -> None:
     client = fake_s3_installer({})
     repo_uri = "s3://demo-bucket/repos/remote_demo"
+    monkeypatch.chdir(tmp_path)
 
     (tmp_path / "data.txt").write_text("s3 dataset content")
     assert run_cli(["commit", "--repo", repo_uri, "-m", "remote seed"]) == 0

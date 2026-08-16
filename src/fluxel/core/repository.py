@@ -851,7 +851,9 @@ def move_staged(
 def status(
     root: str | Path, *, ref: str | None = None, working_tree: bool = True
 ) -> StageStatus:
-    return open_repository(root).status(ref=ref, working_tree=working_tree)
+    return open_repository(root, must_exist=True).status(
+        ref=ref, working_tree=working_tree
+    )
 
 
 def diff(root: str | Path, from_ref: str, to_ref: str) -> list[DiffEntry]:
