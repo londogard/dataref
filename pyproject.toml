@@ -35,10 +35,10 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/londogard/strand"
-Documentation = "https://github.com/londogard/strand#readme"
-Issues = "https://github.com/londogard/strand/issues"
-Changelog = "https://github.com/londogard/strand/blob/main/CHANGELOG.md"
+Repository = "https://github.com/londogard/fluxel"
+Documentation = "https://github.com/londogard/fluxel#readme"
+Issues = "https://github.com/londogard/fluxel/issues"
+Changelog = "https://github.com/londogard/fluxel/blob/main/CHANGELOG.md"
 Funding = "https://github.com/sponsors/londogard"
 
 [project.scripts]

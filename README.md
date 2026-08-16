@@ -60,7 +60,11 @@ Fluxel is intentionally in MVP mode.
 - `duckdb` for disposable analytical indexing
 
 ## Install
+```bash
+uv pip install fluxel
+```
 
+### Developer mode in repo
 ```bash
 uv sync
 uv run fluxel --help

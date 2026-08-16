@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import metadata
 import json
 import sys
 from dataclasses import asdict, dataclass
@@ -650,7 +651,7 @@ def build_parser() -> _CleanParser:
     parser.add_argument(
         "--version",
         action="version",
-        version="fluxel 0.1.0",
+        version=f"fluxel {metadata.version('fluxel')}",
         help="Show version and exit",
     )
     parser.add_arguments(FluxelCLI, dest="cli")
@@ -1397,7 +1398,6 @@ def run_cli(argv: list[str] | None = None) -> int:
                 for cmd in cmds:
                     print(cmd)
             return 0
-
 
     except HANDLED_CLI_ERRORS as error:
         if isinstance(error, NotARepositoryError):
