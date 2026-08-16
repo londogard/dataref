@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from collections.abc import Iterator
+
+from .domain import BranchRefState
+from .objects.derived import DerivedIndex, load_derived_index
+
 
 HEAD_FILE = "HEAD"
-
-
-@dataclass(frozen=True)
-class LocalBranchSnapshot:
-    branch: str
-    commit_id: str | None
-    version_token: str | None
 
 
 class LocalClientState:
@@ -23,6 +20,8 @@ class LocalClientState:
         self.refs_dir = self.fluxel_dir / "refs"
         self.branch_state_dir = self.refs_dir / "heads"
         self.staging_dir = self.fluxel_dir / "staging"
+        self.cache_dir = self.fluxel_dir / "cache"
+        self.reflog_dir = self.fluxel_dir / "reflog"
         self.head_path = self.refs_dir / HEAD_FILE
 
         for path in (
@@ -30,8 +29,55 @@ class LocalClientState:
             self.refs_dir,
             self.branch_state_dir,
             self.staging_dir,
+            self.cache_dir,
+            self.reflog_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
+
+    def append_reflog(
+        self, branch: str, old_commit: str | None, new_commit: str | None, operation: str
+    ) -> None:
+        """Record a ref update (client-side reflog, one line per entry)."""
+        from datetime import datetime, timezone
+
+        path = self.reflog_dir / f"{branch}.log"
+        timestamp = datetime.now(timezone.utc).isoformat()
+        old = old_commit or "0" * 64
+        new = new_commit or "0" * 64
+        line = f"{old} {new} {operation} {timestamp}\n"
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line)
+
+    def iter_reflog(self, branch: str) -> Iterator[str]:
+        path = self.reflog_dir / f"{branch}.log"
+        if not path.exists():
+            return
+        for raw in reversed(path.read_text(encoding="utf-8").splitlines()):
+            if raw.strip():
+                yield raw
+
+    def derived_manifest_path(self, tree_hash: str) -> Path:
+        """Path of the cached derived manifest for *tree_hash*.
+
+        Content-addressed: the cache is safe because a tree hash always maps
+        to identical bytes (see docs/architecture.md §3).
+        """
+        return self.cache_dir / "derived" / f"{tree_hash}.jsonl"
+
+    def derived_index_path(self, tree_hash: str) -> Path:
+        return self.cache_dir / "derived" / f"{tree_hash}.idx"
+
+    def write_derived_index(self, tree_hash: str, index: DerivedIndex) -> None:
+        """Persist the derived-manifest block index (client-side only)."""
+        path = self.derived_index_path(tree_hash)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_text(path, index.serialize() + "\n")
+
+    def read_derived_index(self, tree_hash: str) -> DerivedIndex | None:
+        path = self.derived_index_path(tree_hash)
+        if not path.exists():
+            return None
+        return load_derived_index(json.loads(path.read_text(encoding="utf-8")))
 
     def ensure_current_branch(self, default_branch: str) -> None:
         if not self.head_path.exists():
@@ -59,12 +105,12 @@ class LocalClientState:
             return
         self._atomic_write_text(stage_path, payload)
 
-    def read_branch_snapshot(self, branch: str) -> LocalBranchSnapshot | None:
+    def read_branch_snapshot(self, branch: str) -> BranchRefState | None:
         snapshot_path = self.branch_snapshot_path(branch)
         if not snapshot_path.exists():
             return None
         payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
-        return LocalBranchSnapshot(
+        return BranchRefState(
             branch=branch,
             commit_id=payload.get("commit_id"),
             version_token=payload.get("version_token"),

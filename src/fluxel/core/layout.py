@@ -1,14 +1,9 @@
-# Fluxel Guardrails (Permanent):
-# - DO NOT optimize for ML throughput in canonical storage (`blobs/`): no sharding, tarballs, or parquet in the blob layer.
-# - DO NOT read blob data for metadata-only operations (diff, list, log, status).
-# - DO NOT introduce a server, daemon, or central database; Fluxel is 100% client-side/serverless.
-# - DO NOT use SHA-1/SHA-256; use Blake3 for all content hashing.
-# - PREFER JSONL manifests to preserve streaming and O(1) memory usage.
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+
+from .config import LocalConfig
 
 
 @dataclass(frozen=True)
@@ -17,6 +12,8 @@ class FluxelLayout:
     fluxel_dir: Path
     blobs_dir: Path
     commits_dir: Path
+    trees_dir: Path
+    footers_dir: Path
     manifests_dir: Path
     staging_dir: Path
     refs_dir: Path
@@ -28,6 +25,8 @@ class FluxelLayout:
         fluxel_dir = root_path / ".fluxel"
         blobs_dir = fluxel_dir / "blobs"
         commits_dir = fluxel_dir / "commits"
+        trees_dir = fluxel_dir / "trees"
+        footers_dir = fluxel_dir / "footers"
         manifests_dir = fluxel_dir / "manifests"
         staging_dir = fluxel_dir / "staging"
         refs_dir = fluxel_dir / "refs"
@@ -36,6 +35,8 @@ class FluxelLayout:
         for path in (
             blobs_dir,
             commits_dir,
+            trees_dir,
+            footers_dir,
             manifests_dir,
             staging_dir,
             refs_dir,
@@ -48,6 +49,8 @@ class FluxelLayout:
             fluxel_dir=fluxel_dir,
             blobs_dir=blobs_dir,
             commits_dir=commits_dir,
+            trees_dir=trees_dir,
+            footers_dir=footers_dir,
             manifests_dir=manifests_dir,
             staging_dir=staging_dir,
             refs_dir=refs_dir,
@@ -56,7 +59,12 @@ class FluxelLayout:
 
 
 def initialize_fluxel_layout(root: str | Path) -> FluxelLayout:
-    return FluxelLayout.initialize(root)
+    layout = FluxelLayout.initialize(root)
+    config_path = layout.fluxel_dir / "config.json"
+    if not config_path.exists():
+        default_config = LocalConfig(dataset_root=str(layout.root))
+        default_config.save(layout.root)
+    return layout
 
 
 def blob_relpath(content_hash: str) -> Path:

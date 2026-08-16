@@ -1,10 +1,3 @@
-# Fluxel Guardrails (Permanent):
-# - DO NOT optimize for ML throughput in canonical storage (`blobs/`): no sharding, tarballs, or parquet in the blob layer.
-# - DO NOT read blob data for metadata-only operations (diff, list, log, status).
-# - DO NOT introduce a server, daemon, or central database; Fluxel is 100% client-side/serverless.
-# - DO NOT use SHA-1/SHA-256; use Blake3 for all content hashing.
-# - PREFER JSONL manifests to preserve streaming and O(1) memory usage.
-
 from __future__ import annotations
 
 import json
@@ -17,12 +10,13 @@ from typing import Callable, Iterable, Iterator
 
 from .hashing import blake3_digest_file
 
-
 SUPPORTED_IDENTITY_MODES = frozenset({"blake3", "meta"})
 _BLAKE3_HEX_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _BLOB_BACKED_MANIFEST_TAG = "b"
 _META_ONLY_MANIFEST_TAG = "m"
+_BLOB_BACKED_PARQUET_TAG = "bp"
+_META_ONLY_PARQUET_TAG = "mp"
 
 
 def _is_hex_digest(value: str) -> bool:
@@ -62,6 +56,7 @@ class ManifestEntry:
     identity_value: str | None = None
     blob_hash: str | None = None
     source_uri: str | None = None
+    footer: str | None = None
 
     def __post_init__(self) -> None:
         if self.identity_value is None:
@@ -93,6 +88,9 @@ class ManifestEntry:
         if self.source_uri is not None and not self.source_uri.strip():
             raise ValueError("Manifest entry source_uri cannot be empty")
 
+        if self.footer is not None:
+            _validate_hex_digest(self.footer, field_name="footer")
+
         if self.identity_mode == "meta":
             if self.blob_hash is not None:
                 raise ValueError(
@@ -104,6 +102,91 @@ class ManifestEntry:
                 )
         elif self.blob_hash is not None and self.blob_hash != self.hash:
             raise ValueError("Blob-backed manifest entries must keep blob_hash aligned")
+
+        if self.footer is not None:
+            if self.identity_mode == "meta" and self.blob_hash is not None:
+                raise ValueError(
+                    "Metadata-only parquet entries cannot include blob_hash"
+                )
+            if self.identity_mode == "blake3" and self.blob_hash is None:
+                raise ValueError(
+                    "Blob-backed parquet entries must include blob_hash"
+                )
+
+    @property
+    def is_verified(self) -> bool:
+        """True when the entry is backed by a canonical content blob.
+
+        Metadata-only entries (``identity_mode == "meta"``) are *unverifiable*:
+        their identity is derived from path and size, not from content bytes.
+        Use ``fluxel verify`` to read the source blob, compute a Blake3 hash,
+        and promote the entry to ``blake3`` mode.
+        """
+        return self.identity_mode == "blake3"
+
+    def serialize(self) -> str:
+        if self.identity_mode == "blake3":
+            if self.footer is not None:
+                payload: list[object] = [
+                    _BLOB_BACKED_PARQUET_TAG,
+                    self.path,
+                    self.hash,
+                    self.size,
+                    self.mtime_ns,
+                    self.footer,
+                ]
+            else:
+                payload = [
+                    _BLOB_BACKED_MANIFEST_TAG,
+                    self.path,
+                    self.hash,
+                    self.size,
+                    self.mtime_ns,
+                ]
+        elif self.identity_mode == "meta":
+            if self.footer is not None:
+                payload = [
+                    _META_ONLY_PARQUET_TAG,
+                    self.path,
+                    self.hash,
+                    self.size,
+                    self.mtime_ns,
+                    self.source_uri,
+                    self.footer,
+                ]
+            else:
+                payload = [
+                    _META_ONLY_MANIFEST_TAG,
+                    self.path,
+                    self.hash,
+                    self.size,
+                    self.mtime_ns,
+                    self.source_uri,
+                ]
+        else:
+            supported_modes = ", ".join(sorted(SUPPORTED_IDENTITY_MODES))
+            raise ValueError(
+                f"Manifest entry identity_mode must be one of: {supported_modes}"
+            )
+        return json.dumps(payload, separators=(",", ":"))
+
+    @staticmethod
+    def deserialize(payload_text: str) -> "ManifestEntry":
+        try:
+            payload = _load_manifest_payload(payload_text)
+        except JSONDecodeError as error:
+            raise ValueError("Corrupt manifest entry payload") from error
+        return _manifest_entry_from_payload(payload)
+
+    @staticmethod
+    def path_from_payload(payload_text: str) -> str:
+        try:
+            payload = _load_manifest_payload(payload_text)
+        except JSONDecodeError as error:
+            raise ValueError("Corrupt manifest entry payload") from error
+        if not isinstance(payload, list) or len(payload) < 2:
+            raise ValueError("Manifest entry payload must be a JSON array")
+        return str(payload[1])
 
     @staticmethod
     def from_dict(data: dict[str, object]) -> "ManifestEntry":
@@ -118,11 +201,12 @@ class ManifestEntry:
         if blob_hash is None and "blob_hash" not in data and identity_mode == "blake3":
             blob_hash = hash_value
         source_uri = data.get("source_uri")
+        footer = data.get("footer")
 
         try:
             path = str(data["path"])
-            size = int(data["size"])
-            mtime_ns = int(data["mtime_ns"])
+            size = int(data["size"])  # type: ignore[arg-type]
+            mtime_ns = int(data["mtime_ns"])  # type: ignore[arg-type]
         except KeyError as error:
             raise ValueError(
                 f"Manifest entry is missing required field: {error.args[0]}"
@@ -143,52 +227,8 @@ class ManifestEntry:
             ),
             blob_hash=str(blob_hash) if blob_hash is not None else None,
             source_uri=str(source_uri) if source_uri is not None else None,
+            footer=str(footer) if footer is not None else None,
         )
-
-
-def serialize_manifest_entry(entry: ManifestEntry) -> str:
-    if entry.identity_mode == "blake3":
-        payload: list[object] = [
-            _BLOB_BACKED_MANIFEST_TAG,
-            entry.path,
-            entry.hash,
-            entry.size,
-            entry.mtime_ns,
-        ]
-    elif entry.identity_mode == "meta":
-        payload = [
-            _META_ONLY_MANIFEST_TAG,
-            entry.path,
-            entry.hash,
-            entry.size,
-            entry.mtime_ns,
-            entry.source_uri,
-        ]
-    else:
-        supported_modes = ", ".join(sorted(SUPPORTED_IDENTITY_MODES))
-        raise ValueError(
-            f"Manifest entry identity_mode must be one of: {supported_modes}"
-        )
-    return json.dumps(payload, separators=(",", ":"))
-
-
-def deserialize_manifest_entry(payload_text: str) -> ManifestEntry:
-    try:
-        payload = _load_manifest_payload(payload_text)
-    except JSONDecodeError as error:
-        raise ValueError("Corrupt manifest entry payload") from error
-
-    return _manifest_entry_from_payload(payload)
-
-
-def manifest_entry_path(payload_text: str) -> str:
-    try:
-        payload = _load_manifest_payload(payload_text)
-    except JSONDecodeError as error:
-        raise ValueError("Corrupt manifest entry payload") from error
-    if not isinstance(payload, list) or len(payload) < 2:
-        raise ValueError("Manifest entry payload must be a JSON array")
-    return str(payload[1])
 
 
 def _load_manifest_payload(payload_text: str) -> object:
@@ -223,25 +263,104 @@ def _manifest_entry_from_payload(payload: object) -> ManifestEntry:
             blob_hash=None,
             source_uri=str(source_uri),
         )
+    if len(payload) == 6 and payload[0] == _BLOB_BACKED_PARQUET_TAG:
+        _, path, hash_value, size, mtime_ns, footer = payload
+        return ManifestEntry(
+            path=str(path),
+            hash=str(hash_value),
+            size=int(size),
+            mtime_ns=int(mtime_ns),
+            identity_mode="blake3",
+            identity_value=str(hash_value),
+            blob_hash=str(hash_value),
+            source_uri=None,
+            footer=str(footer),
+        )
+    if len(payload) == 7 and payload[0] == _META_ONLY_PARQUET_TAG:
+        _, path, hash_value, size, mtime_ns, source_uri, footer = payload
+        return ManifestEntry(
+            path=str(path),
+            hash=str(hash_value),
+            size=int(size),
+            mtime_ns=int(mtime_ns),
+            identity_mode="meta",
+            identity_value=str(hash_value),
+            blob_hash=None,
+            source_uri=str(source_uri),
+            footer=str(footer),
+        )
     raise ValueError("Manifest entry payload has an unsupported shape")
 
 
-class ManifestWriter:
-    def __init__(self, manifest_path: str | Path) -> None:
-        self.manifest_path = Path(manifest_path)
+def _manifest_entry_path_for_index(payload_text: str) -> str:
+    """Extract the path from a compact-serialized manifest entry without full JSON parse.
 
-    def write_entries(self, entries: Iterable[ManifestEntry | str]) -> int:
+    The compact JSON format is always ``["b","path",...]`` or ``["m","path",...]``
+    with ``separators=(",",":")`` — the path is the third quoted field.
+    """
+    return payload_text.split('"', 4)[3]
+
+
+class ManifestWriter:
+    def __init__(
+        self, manifest_path: str | Path, *, block_entry_count: int = 0
+    ) -> None:
+        self.manifest_path = Path(manifest_path)
+        self.block_entry_count = block_entry_count
+        self._blocks: list[tuple[str, int]] = []
+        self._entry_count = 0
+        self._manifest_size = 0
+
+    def write_entries(
+        self, entries: Iterable[ManifestEntry | str | tuple[str, str]]
+    ) -> int:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         written = 0
-        with self.manifest_path.open("w", encoding="utf-8") as handle:
+        offset = 0
+        previous_path: str | None = None
+        with self.manifest_path.open("wb") as handle:
             for entry in entries:
-                if isinstance(entry, str):
-                    handle.write(entry)
+                path = ""
+                if isinstance(entry, tuple):
+                    path, payload = entry
+                    line = payload.encode("utf-8")
+                elif isinstance(entry, str):
+                    line = entry.encode("utf-8")
+                    if self.block_entry_count > 0:
+                        path = _manifest_entry_path_for_index(entry)
                 else:
-                    handle.write(serialize_manifest_entry(entry))
-                handle.write("\n")
+                    line = entry.serialize().encode("utf-8")
+                    path = entry.path
+
+                if self.block_entry_count > 0:
+                    if previous_path is not None and path <= previous_path:
+                        raise ValueError(
+                            "Manifest entries must be sorted by path to build an index"
+                        )
+                    if written % self.block_entry_count == 0:
+                        self._blocks.append((path, offset))
+                    previous_path = path
+
+                handle.write(line + b"\n")
+                offset += len(line) + 1
                 written += 1
+
+        self._entry_count = written
+        self._manifest_size = offset
         return written
+
+    def build_index(self):
+        if self.block_entry_count <= 0 or not self._blocks:
+            return None
+        from .objects.derived import DerivedIndex, DerivedIndexBlock
+
+        return DerivedIndex(
+            manifest_size=self._manifest_size,
+            block_entry_count=self.block_entry_count,
+            blocks=tuple(
+                DerivedIndexBlock(first_path=p, offset=o) for p, o in self._blocks
+            ),
+        )
 
     def write_files(
         self,
@@ -281,13 +400,6 @@ class ManifestReader:
                         f"Invalid manifest entry at line {line_number} in {self.manifest_path}: {error}"
                     ) from error
 
-    def get_entry(self, logical_path: str) -> ManifestEntry | None:
-        match: ManifestEntry | None = None
-        for entry in self.iter_entries():
-            if entry.path == logical_path:
-                match = entry
-        return match
-
 
 def build_manifest_entries(
     files: Iterable[str | Path],
@@ -316,6 +428,7 @@ def build_manifest_entries(
 @dataclass(frozen=True)
 class FileEntry:
     path: Path
+    relative_path: str
     size: int
     mtime_ns: int
 
@@ -323,7 +436,7 @@ class FileEntry:
 def walk_files(root: str | Path) -> Iterator[FileEntry]:
     root_path = Path(root).resolve()
 
-    def iter_dir(path: Path) -> Iterator[FileEntry]:
+    def iter_dir(path: Path, rel_parts: tuple[str, ...]) -> Iterator[FileEntry]:
         try:
             entries = sorted(os.scandir(path), key=lambda entry: entry.name)
         except PermissionError:
@@ -332,13 +445,15 @@ def walk_files(root: str | Path) -> Iterator[FileEntry]:
             if entry.name == ".fluxel":
                 continue
             if entry.is_dir(follow_symlinks=False):
-                yield from iter_dir(Path(entry.path))
+                yield from iter_dir(Path(entry.path), rel_parts + (entry.name,))
             elif entry.is_file(follow_symlinks=False):
                 stat = entry.stat()
+                rel_path = "/".join(rel_parts + (entry.name,))
                 yield FileEntry(
                     path=Path(entry.path),
+                    relative_path=rel_path,
                     size=stat.st_size,
                     mtime_ns=stat.st_mtime_ns,
                 )
 
-    yield from iter_dir(root_path)
+    yield from iter_dir(root_path, ())

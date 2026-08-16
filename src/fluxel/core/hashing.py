@@ -1,10 +1,3 @@
-# Fluxel Guardrails (Permanent):
-# - DO NOT optimize for ML throughput in canonical storage (`blobs/`): no sharding, tarballs, or parquet in the blob layer.
-# - DO NOT read blob data for metadata-only operations (diff, list, log, status).
-# - DO NOT introduce a server, daemon, or central database; Fluxel is 100% client-side/serverless.
-# - DO NOT use SHA-1/SHA-256; use Blake3 for all content hashing.
-# - PREFER JSONL manifests to preserve streaming and O(1) memory usage.
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,7 +5,7 @@ from typing import BinaryIO
 
 from blake3 import blake3
 
-DEFAULT_CHUNK_SIZE = 64 * 1024
+DEFAULT_CHUNK_SIZE = 1024 * 1024
 
 
 def blake3_digest_stream(stream: BinaryIO, chunk_size: int = DEFAULT_CHUNK_SIZE) -> str:

@@ -8,7 +8,6 @@ import pytest
 
 from fluxel.core import FluxelRepository, RefConflictError, open_repository
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -61,7 +60,7 @@ def test_s3_integration_branch_commit_and_fast_forward_merge(
     )
     repo_feature.set_current_branch("feature")
     repo_feature.add(["feature.txt"])
-    feature_commit = repo_feature.commit("feature commit", staged=True)
+    feature_commit = repo_feature.commit("feature commit")
 
     merge_result = repo_main.merge("feature", "main")
     assert merge_result.updated is True
@@ -258,12 +257,21 @@ def test_s3_integration_million_file_scale(
         client_root=client_root,
         s3_client=ministack_client,
     )
+    # Use metadata identity for performance (no content hashing on 1M empty files)
+    from fluxel.core.config import S3Config
+    from fluxel.core.objects import parse_s3_uri
+
+    bucket, prefix = parse_s3_uri(s3_repo_root)
+    cfg = S3Config(
+        dataset_root=str(worktree), bucket=bucket, prefix=prefix, identity="meta"
+    )
+    cfg.save(worktree)
     commit_start = time.perf_counter()
-    commit_id = repo.commit("1M file snapshot (meta)", identity_mode="meta")
+    commit_id = repo.commit("1M file snapshot")
     commit_time = time.perf_counter() - commit_start
     assert commit_id
     print(
-        f"[SCALE TEST] Commit + manifest build in {commit_time:.2f}s ({1_000_000/commit_time:.0f} files/sec)"
+        f"[SCALE TEST] Commit + tree build in {commit_time:.2f}s ({1_000_000/commit_time:.0f} files/sec)"
     )
 
     # 3. Test: Specific file lookup (should be O(log B + 1))
@@ -309,7 +317,7 @@ def test_s3_integration_million_file_scale(
         f"  Generate 1M files:       {gen_time:.2f}s ({1_000_000/gen_time:.0f} files/sec)"
     )
     print(
-        f"  Commit + manifest:       {commit_time:.2f}s ({1_000_000/commit_time:.0f} files/sec)"
+        f"  Commit + tree build:     {commit_time:.2f}s ({1_000_000/commit_time:.0f} files/sec)"
     )
     print(f"  Single lookup:           {lookup_time*1000:.3f}ms")
     print(f"  Prefix list (200):       {listing_time*1000:.3f}ms")

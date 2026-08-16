@@ -33,7 +33,10 @@ Fluxel is intentionally in MVP mode.
 
 - Commit snapshots over a dataset root (`fluxel commit`).
 - Repository URI support via `--repo <path|s3://bucket/prefix>` and `open_repository(...)`.
-- Streaming S3 imports (`fluxel import`) with `blake3` or metadata identity modes.
+- Repository initialization (`fluxel init`) with local or S3 backend.
+- Remote sync workflow (`fluxel fetch`, `fluxel pull`, `fluxel push`).
+- Operator-facing S3 lock inspection and cleanup (`fluxel lock list`, `fluxel lock cleanup`).
+- Streaming S3 ingress from `s3://` objects and prefixes via staged `fluxel add ... --identity meta --as ...` followed by `fluxel commit --staged`.
 - Branch-scoped staging workflow (`fluxel add`, `fluxel rm`, `fluxel status`, `fluxel commit --staged`).
 - Incremental ingress paths that preserve existing manifest entries while adding only new content metadata/blobs.
 - Commit identity modes: `blake3` (default) and `meta` (`hash(path+size)`).
@@ -41,18 +44,12 @@ Fluxel is intentionally in MVP mode.
 - Zero-copy branch pointers (`fluxel branch`).
 - Fast-forward-only branch merge (`fluxel merge`).
 - Metadata-only diff between refs (`fluxel diff`).
-- Metadata-only manifest mutations for committed refs (`fluxel rm -m ...`, `fluxel mv -m ... ...`).
-- Disposable analytical index from manifest (`fluxel index build/query/drop`, DuckDB + optional Parquet export).
+- Metadata-only manifest mutations for committed refs via the staged flow (`fluxel rm ...`, `fluxel mv ... ...`, then `fluxel commit --staged`).
+- File restoration from refs (`fluxel restore <ref> [--path ...] [--force]`).
+- Disposable analytical index from manifest (`fluxel index build`, DuckDB + optional Parquet export).
 - `fsspec` provider for `fluxel://` URI reads.
 - Local + S3 storage backend abstractions available in code.
-
-### Not Fully Wired Yet
-
-- No remote sync CLI (`push/pull/fetch`) yet.
-- No `log/status/list/checkout` CLI surface yet.
-- No `s5cmd` command-list generation path for bulk transfer yet.
-- S3 branch locking now recovers expired stale lock objects automatically, but there is still no operator-facing lock inspection or cleanup command.
-- S3 branch locking now recovers expired stale lock objects automatically, but there is still no operator-facing lock inspection or cleanup command.
+- Human-readable output by default; `--json` flag on all commands for programmatic use.
 
 ## Technical Stack
 
@@ -82,27 +79,37 @@ If your company uses Fluxel, sponsor ongoing maintenance at <https://github.com/
 ## Quickstart
 
 ```bash
+# Initialize a new repository
 mkdir -p /tmp/fluxel-demo
+uv run fluxel init --repo /tmp/fluxel-demo
+# Or with S3 backend: uv run fluxel init --repo /tmp/fluxel-demo --backend s3 --s3-bucket my-bucket
+
 echo "hello" > /tmp/fluxel-demo/a.txt
 
 uv run fluxel commit --repo /tmp/fluxel-demo -m "initial"
-uv run fluxel commit --repo /tmp/fluxel-demo -m "fast metadata snapshot" --identity meta
-uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/bootstrap -m "bootstrap import"
-uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/bootstrap -m "metadata import" --identity meta
-uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/bootstrap -m "jpg subset" --path "**/*.jpg" --path root.csv
-uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/incremental -m "add new import batch"
-uv run fluxel verify --repo /tmp/fluxel-demo --ref main
+
+# Stage an S3 prefix as metadata-only entries, then commit the staged additions
+uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
+uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "metadata import"
+uv run fluxel verify --repo /tmp/fluxel-demo
 
 # branch-scoped staged flow
 uv run fluxel branch --repo /tmp/fluxel-demo feature
-uv run fluxel add --repo /tmp/fluxel-demo --ref feature data/new.csv
-uv run fluxel add --repo /tmp/fluxel-demo --ref feature --as imports/raw.csv /tmp/outside-repo/raw.csv
-uv run fluxel add --repo /tmp/fluxel-demo --ref feature --as imports/bundle /tmp/outside-repo/bundle
-uv run fluxel add --repo /tmp/fluxel-demo --ref feature --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
-uv run fluxel add --repo /tmp/fluxel-demo --ref feature --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
-uv run fluxel status --repo /tmp/fluxel-demo --ref feature
-uv run fluxel commit --repo /tmp/fluxel-demo --ref feature --staged -m "feature updates"
+uv run fluxel checkout --repo /tmp/fluxel-demo feature
+uv run fluxel add --repo /tmp/fluxel-demo data/new.csv
+uv run fluxel add --repo /tmp/fluxel-demo --as imports/raw.csv /tmp/outside-repo/raw.csv
+uv run fluxel add --repo /tmp/fluxel-demo --as imports/bundle /tmp/outside-repo/bundle
+uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
+uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
+uv run fluxel status --repo /tmp/fluxel-demo
+uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "feature updates"
+uv run fluxel checkout --repo /tmp/fluxel-demo main
 uv run fluxel merge --repo /tmp/fluxel-demo feature main
+
+# restore files from a ref
+uv run fluxel restore --repo /tmp/fluxel-demo main
+uv run fluxel restore --repo /tmp/fluxel-demo main --path data/new.csv
+uv run fluxel restore --repo /tmp/fluxel-demo main --force
 
 echo "hello v2" > /tmp/fluxel-demo/a.txt
 uv run fluxel commit --repo /tmp/fluxel-demo -m "update"
@@ -116,23 +123,34 @@ uv run fluxel mv --repo /tmp/fluxel-demo raw/images curated/images
 uv run fluxel status --repo /tmp/fluxel-demo
 uv run fluxel commit --repo /tmp/fluxel-demo -m "clean up old files and rename image prefix"
 
-# Or commit metadata mutations directly with a message
-uv run fluxel rm --repo /tmp/fluxel-demo logs/2025 -m "remove old logs"
-uv run fluxel mv --repo /tmp/fluxel-demo incoming/images curated/images -m "reorganize images"
+# Or stage the mutation and commit it with a single message
+uv run fluxel rm --repo /tmp/fluxel-demo logs/2025
+uv run fluxel mv --repo /tmp/fluxel-demo incoming/images curated/images
+uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "remove old logs and rename prefix"
 
 # remote repo metadata operations from the current working tree
 uv run fluxel branch --repo s3://my-bucket/datasets/demo feature
 uv run fluxel commit --repo s3://my-bucket/datasets/demo -m "snapshot current working tree"
-uv run fluxel rm --repo s3://my-bucket/datasets/demo obsolete -m "drop obsolete paths"
-uv run fluxel mv --repo s3://my-bucket/datasets/demo bootstrap final -m "rename imported prefix"
+uv run fluxel rm --repo s3://my-bucket/datasets/demo obsolete
+uv run fluxel mv --repo s3://my-bucket/datasets/demo bootstrap final
+uv run fluxel commit --repo s3://my-bucket/datasets/demo --staged -m "drop obsolete paths and rename imported prefix"
+
+# JSON output for programmatic use (all commands support --json)
+uv run fluxel status --repo /tmp/fluxel-demo --json
+uv run fluxel add --repo /tmp/fluxel-demo data/new.csv --json
+uv run fluxel diff --repo /tmp/fluxel-demo main feature --json
 ```
 
 ## Analytical Index (Derived, Disposable)
 
 ```bash
-uv run fluxel index build --repo /tmp/fluxel-demo --ref main --parquet
-uv run fluxel index query --db /path/to/<commit>.duckdb --sql "SELECT COUNT(*) FROM files"
-uv run fluxel index drop --db /path/to/<commit>.duckdb
+uv run fluxel index build --repo /tmp/fluxel-demo --parquet
+```
+
+`fluxel index build` writes a DuckDB database (and optional Parquet export) for the current branch's manifest to `.fluxel/index/<commit_id>.duckdb`. Query it with the DuckDB CLI:
+
+```bash
+duckdb /path/to/<commit>.duckdb "SELECT COUNT(*) FROM files"
 ```
 
 If the index is deleted, Fluxel remains fully functional from manifests and commits.
@@ -151,32 +169,65 @@ with fs.open("fluxel://my_data@feature+staged/a.txt", "rb") as handle:
 	 staged_data = handle.read()
 ```
 
-In `--identity meta` snapshots, Fluxel reads from `source_uri` when no canonical `blobs/` object exists.
+In `meta` snapshots, Fluxel reads from `source_uri` when no canonical `blobs/` object exists.
 
 ## Identity Modes
 
-`fluxel commit` supports two identity modes:
+Fluxel supports two identity modes for manifest entries:
 
-- `--identity blake3` (default)
+- `blake3` (default)
 	- Reads file bytes.
 	- Stores canonical blob in `.fluxel/blobs/`.
 	- Manifest entry includes `identity_mode=blake3`, `identity_value`, and `blob_hash`.
 
-- `--identity meta`
+- `meta`
 	- Does not read file bytes.
 	- Computes identity as `blake3("<relative_path>\n<size>")`.
 	- Stores no canonical blob (`blob_hash=null`) and keeps `source_uri` for reads.
 
+Set the mode per staged addition with `fluxel add --identity meta`, or set the
+repository-wide default for `fluxel commit` with `fluxel config set identity meta`.
+
 This is useful for large bootstrap imports where strong content verification can be deferred.
+
+### Durability contract for `meta`
+
+Metadata-only (`meta`) revisions are **unverifiable**: the entry's
+identity is derived from path and size, not from content bytes. Until you run
+`fluxel verify`, Fluxel cannot prove that the content at `source_uri` matches
+what was originally imported.
+
+**Warnings.** The CLI emits a warning to stderr whenever you stage with
+`--identity meta` or commit a repository whose identity is configured to `meta`,
+and after `verify` reports how many unverifiable entries remain.
+
+**Source-retention policy.** Because metadata-only entries have no canonical
+blob, you **must** retain the source objects at their original `source_uri`
+until the entry has been promoted via `fluxel verify`. If a source object is
+deleted, overwritten, or moved before verification, the corresponding manifest
+entry becomes irrecoverable — no content can be read and no hash can be
+validated.
+
+**Promotion to verifiable.** Run `fluxel verify` to read every metadata-only
+entry's source blob, compute a Blake3 content hash, store the canonical blob,
+and rewrite the manifest entry in `blake3` mode. After promotion the source
+retention requirement is lifted for those entries.
+
+**Lifecycle summary:**
+
+| State | `identity_mode` | `blob_hash` | Can read? | Can prove integrity? | Source required? |
+|---|---|---|---|---|---|
+| Metadata-only | `meta` | `null` | ✅ (from `source_uri`) | ❌ | ✅ |
+| Verified | `blake3` | hash | ✅ (from `blobs/`) | ✅ | ❌ |
 
 ## Verify Command
 
-`fluxel verify` promotes metadata-only (`--identity meta`) manifest entries into canonical `blake3` blob-backed entries:
+`fluxel verify` promotes metadata-only (`meta`) manifest entries of the current branch into canonical `blake3` blob-backed entries:
 
 ```bash
-uv run fluxel verify --repo /tmp/fluxel-demo --ref main
-uv run fluxel verify --repo /tmp/fluxel-demo --ref main --path images --path logs/2026
-uv run fluxel verify --repo /tmp/fluxel-demo --ref main --dry-run
+uv run fluxel verify --repo /tmp/fluxel-demo
+uv run fluxel verify --repo /tmp/fluxel-demo --path images --path logs/2026
+uv run fluxel verify --repo /tmp/fluxel-demo --dry-run
 ```
 
 - Verifies all entries by default (or selected path prefixes with `--path`).
@@ -195,13 +246,11 @@ uv run fluxel add --repo /tmp/fluxel-demo --as imports/new-batch /tmp/random/new
 uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
 uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
 uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "add one file"
-uv run fluxel import --repo /tmp/fluxel-demo s3://my-bucket/incremental -m "merge imported batch"
-uv run fluxel verify --repo /tmp/fluxel-demo --ref main --path images --path root.txt
+uv run fluxel verify --repo /tmp/fluxel-demo --path images --path root.txt
 ```
 
 - `add` + `commit --staged` preserves the current branch manifest and reads bytes only for staged additions.
 - `add` accepts repo-relative files, arbitrary local files, local directories, single S3 objects, and S3 prefixes; `--as` maps a single file/object to one logical path or remaps a directory/prefix under a destination prefix.
-- `import` merges imported S3 entries into the current branch manifest instead of replacing the snapshot.
 - `verify` reads bytes only for selected metadata-only entries that still need canonical blobs.
 - Existing manifest entries are preserved without re-uploading unchanged blob content.
 
@@ -283,18 +332,18 @@ uv run fluxel merge --repo /tmp/fluxel-demo feature main
 
 ## Metadata-Only Remove And Move
 
-`fluxel rm` and `fluxel mv` can mutate committed refs directly by writing a new manifest and commit:
+`fluxel rm` and `fluxel mv` stage metadata-only mutations; `fluxel commit --staged` writes a new manifest and commit:
 
 ```bash
-uv run fluxel rm --repo /tmp/fluxel-demo logs/2025 -m "remove old logs"
-uv run fluxel mv --repo /tmp/fluxel-demo incoming/images curated/images -m "rename prefix"
-uv run fluxel rm --repo s3://my-bucket/datasets/demo temp -m "drop temp data"
+uv run fluxel rm --repo /tmp/fluxel-demo logs/2025
+uv run fluxel mv --repo /tmp/fluxel-demo incoming/images curated/images
+uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "remove old logs and rename prefix"
 ```
 
 - These operations read manifest metadata only; they do not download unchanged blob payloads.
 - `rm` accepts file paths or path prefixes and removes all matching logical entries.
 - `mv` accepts a file path or prefix and rewrites matching logical paths in the manifest.
-- Existing staged behavior remains available: `fluxel rm` without `-m/--message` still stages removals for `fluxel commit --staged`.
+- `fluxel status` shows staged removals and renames before `fluxel commit --staged`.
 
 ## Repository Layout
 

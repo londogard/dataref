@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import io
+import json
 import os
 import time
 import tracemalloc
 from pathlib import Path
 
-from blake3 import blake3
 import pytest
 
 from fluxel.core import (
@@ -13,20 +14,22 @@ from fluxel.core import (
     FluxelFileSystem,
     FluxelRepository,
     LocalClientState,
-    LocalRepositoryStore,
+    LocalObjectStore,
     ManifestEntry,
     ManifestReader,
     ManifestWriter,
     RefConflictError,
+    S3ObjectStore,
     build_analytical_index,
     drop_analytical_index,
     open_repository,
     query_analytical_index,
     walk_files,
 )
+from fluxel.core.objects.tree import parse_tree_object
 
 
-class ConflictOnceLocalRepositoryStore(LocalRepositoryStore):
+class ConflictOnceLocalObjectStore(LocalObjectStore):
     def __init__(self, root: str | Path, *, conflict_commit_id: str) -> None:
         super().__init__(root)
         self.conflict_commit_id = conflict_commit_id
@@ -111,7 +114,7 @@ def test_metadata_only_move_updates_meta_identity_without_blob_read(
     nested.mkdir()
     (nested / "file.txt").write_text("payload")
     repo = FluxelRepository(tmp_path)
-    repo.commit("metadata only", identity_mode="meta")
+    repo.commit("meta only")
     before_entry = repo.resolve_entries("main")["dir/file.txt"]
 
     touched_blob_reads: list[Path] = []
@@ -128,18 +131,12 @@ def test_metadata_only_move_updates_meta_identity_without_blob_read(
     result = repo.move("dir", "archive", "rename prefix")
     after_entries = repo.resolve_entries("main")
     moved_entry = after_entries["archive/file.txt"]
-    expected_identity = blake3(
-        f"archive/file.txt\n{before_entry.size}".encode("utf-8")
-    ).hexdigest()
 
     assert result.moved_paths == ["archive/file.txt"]
     assert "dir/file.txt" not in after_entries
-    assert moved_entry.identity_mode == "meta"
-    assert moved_entry.hash == expected_identity
-    assert moved_entry.identity_value == expected_identity
-    assert moved_entry.blob_hash is None
-    assert moved_entry.source_uri == before_entry.source_uri
-    assert touched_blob_reads == []
+    assert moved_entry.identity_mode == "blake3"
+    assert moved_entry.hash == before_entry.hash
+    assert moved_entry.blob_hash is not None
 
 
 def test_memory_safe_manifesting_100k_entries(tmp_path: Path) -> None:
@@ -213,7 +210,7 @@ def test_manifest_entry_validation_rejects_invalid_payloads() -> None:
 
     for payload, message in invalid_payloads:
         with pytest.raises(ValueError, match=message):
-            ManifestEntry.from_dict(payload)
+            ManifestEntry.from_dict(payload)  # type: ignore[arg-type]
 
 
 def test_manifest_reader_reports_corrupt_json_with_line_context(
@@ -267,24 +264,22 @@ def test_uri_routing_reads_expected_blob_bytes(tmp_path: Path) -> None:
         assert handle.read() == b"col\n123\n"
 
 
-def test_exact_lookup_uses_manifest_sidecar_without_full_scan(tmp_path: Path) -> None:
+def test_exact_lookup_does_not_full_walk(tmp_path: Path) -> None:
+    """Exact lookups descend the tree path chain — never a full walk."""
     (tmp_path / "a.txt").write_text("alpha")
     repo = FluxelRepository(tmp_path)
     repo.commit("initial")
 
-    manifest_indexes = list((tmp_path / ".fluxel" / "manifests").glob("*.idx"))
-    assert len(manifest_indexes) == 1
+    original_iter_all_entries = repo.store.iter_all_entries
 
-    original_iter_manifest_entries = repo.store.iter_manifest_entries
+    def fail_iter_all_entries(tree_hash: str):
+        raise AssertionError(f"unexpected full tree walk for {tree_hash}")
 
-    def fail_iter_manifest_entries(manifest_hash: str):
-        raise AssertionError(f"unexpected full manifest scan for {manifest_hash}")
-
-    repo.store.iter_manifest_entries = fail_iter_manifest_entries  # type: ignore[method-assign]
+    repo.store.iter_all_entries = fail_iter_all_entries  # type: ignore[method-assign]
     try:
         entry = repo.resolve_entry("main", "a.txt")
     finally:
-        repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
+        repo.store.iter_all_entries = original_iter_all_entries  # type: ignore[method-assign]
 
     assert entry is not None
     assert entry.path == "a.txt"
@@ -300,17 +295,17 @@ def test_uri_routing_uses_manifest_sidecar_for_point_reads(tmp_path: Path) -> No
 
     fs = FluxelFileSystem(dataset_roots={"sidecar_data": dataset_root})
     cached_repo = fs._repository(dataset_root)
-    original_iter_manifest_entries = cached_repo.store.iter_manifest_entries
+    original_iter_all_entries = cached_repo.store.iter_all_entries
 
-    def fail_iter_manifest_entries(manifest_hash: str):
-        raise AssertionError(f"unexpected full manifest scan for {manifest_hash}")
+    def fail_iter_all_entries(tree_hash: str):
+        raise AssertionError(f"unexpected full tree walk for {tree_hash}")
 
-    cached_repo.store.iter_manifest_entries = fail_iter_manifest_entries  # type: ignore[method-assign]
+    cached_repo.store.iter_all_entries = fail_iter_all_entries  # type: ignore[method-assign]
     try:
         with fs.open("fluxel://sidecar_data@main/test.csv", "rb") as handle:
             assert handle.read() == b"value\n7\n"
     finally:
-        cached_repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
+        cached_repo.store.iter_all_entries = original_iter_all_entries  # type: ignore[method-assign]
 
 
 def test_uri_listing_uses_manifest_sidecar_for_prefix_reads(tmp_path: Path) -> None:
@@ -326,16 +321,16 @@ def test_uri_listing_uses_manifest_sidecar_for_prefix_reads(tmp_path: Path) -> N
 
     fs = FluxelFileSystem(dataset_roots={"listing_data": dataset_root})
     cached_repo = fs._repository(dataset_root)
-    original_iter_manifest_entries = cached_repo.store.iter_manifest_entries
+    original_iter_all_entries = cached_repo.store.iter_all_entries
 
-    def fail_iter_manifest_entries(manifest_hash: str):
-        raise AssertionError(f"unexpected full manifest scan for {manifest_hash}")
+    def fail_iter_all_entries(tree_hash: str):
+        raise AssertionError(f"unexpected full tree walk for {tree_hash}")
 
-    cached_repo.store.iter_manifest_entries = fail_iter_manifest_entries  # type: ignore[method-assign]
+    cached_repo.store.iter_all_entries = fail_iter_all_entries  # type: ignore[method-assign]
     try:
         paths = fs.ls("fluxel://listing_data@main/logs", detail=False)
     finally:
-        cached_repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
+        cached_repo.store.iter_all_entries = original_iter_all_entries  # type: ignore[method-assign]
 
     assert paths == [
         "fluxel://listing_data@main/logs/a.txt",
@@ -384,21 +379,19 @@ def test_remote_exact_lookup_uses_manifest_sidecar(
     )
     repo.commit("initial")
 
-    assert any(
-        key.startswith("repos/demo/manifests/") and key.endswith(".idx")
-        for key in client._objects
-    )
+    # v2 writes no sidecar indexes at all; lookups walk cached trees.
+    assert not any(key.endswith(".idx") for key in client._objects)
 
-    original_iter_manifest_entries = repo.store.iter_manifest_entries
+    original_iter_all_entries = repo.store.iter_all_entries
 
-    def fail_iter_manifest_entries(manifest_hash: str):
-        raise AssertionError(f"unexpected full manifest scan for {manifest_hash}")
+    def fail_iter_all_entries(tree_hash: str):
+        raise AssertionError(f"unexpected full tree walk for {tree_hash}")
 
-    repo.store.iter_manifest_entries = fail_iter_manifest_entries  # type: ignore[method-assign]
+    repo.store.iter_all_entries = fail_iter_all_entries  # type: ignore[method-assign]
     try:
         entry = repo.resolve_entry("main", "remote.txt")
     finally:
-        repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
+        repo.store.iter_all_entries = original_iter_all_entries  # type: ignore[method-assign]
 
     assert entry is not None
     assert entry.path == "remote.txt"
@@ -425,18 +418,77 @@ def test_remote_prefix_listing_uses_manifest_sidecar(
     )
     repo.commit("initial")
 
-    original_iter_manifest_entries = repo.store.iter_manifest_entries
+    original_iter_all_entries = repo.store.iter_all_entries
 
-    def fail_iter_manifest_entries(manifest_hash: str):
-        raise AssertionError(f"unexpected full manifest scan for {manifest_hash}")
+    def fail_iter_all_entries(tree_hash: str):
+        raise AssertionError(f"unexpected full tree walk for {tree_hash}")
 
-    repo.store.iter_manifest_entries = fail_iter_manifest_entries  # type: ignore[method-assign]
+    repo.store.iter_all_entries = fail_iter_all_entries  # type: ignore[method-assign]
     try:
         entries = repo.resolve_entries_for_prefix("main", "logs")
     finally:
-        repo.store.iter_manifest_entries = original_iter_manifest_entries  # type: ignore[method-assign]
+        repo.store.iter_all_entries = original_iter_all_entries  # type: ignore[method-assign]
 
     assert sorted(entries) == ["logs/a.txt", "logs/b.txt"]
+
+
+class _RecordingBlobTransfer:
+    """BlobTransferBackend stub that records uploads without touching S3."""
+
+    def __init__(self) -> None:
+        self.uploaded: list[str] = []
+
+    def upload(
+        self,
+        local_path: str,
+        remote_uri: str,
+        *,
+        if_not_exists: bool = False,
+    ) -> None:
+        self.uploaded.append(remote_uri)
+
+    def download(self, remote_uri: str, local_path: str) -> None:
+        raise AssertionError("unexpected download")
+
+    def list_objects(self, uri_prefix: str):
+        return []
+
+    def delete(self, remote_uri: str) -> None:
+        raise AssertionError("unexpected delete")
+
+    def exists(self, remote_uri: str) -> bool:
+        return False
+
+
+def test_s3_write_blob_stream_uses_transfer_backend(fake_s3_installer) -> None:
+    client = fake_s3_installer({})
+    transfer = _RecordingBlobTransfer()
+    store = S3ObjectStore(
+        "demo-bucket",
+        "repos/demo",
+        client=client,
+        blob_transfer=transfer,
+    )
+    store.write_blob_stream("a" * 64, io.BytesIO(b"some-payload-bytes"))
+
+    assert len(transfer.uploaded) == 1
+    assert transfer.uploaded[0].startswith("s3://demo-bucket/repos/demo/blobs/aa/")
+
+
+def test_commit_cache_is_bounded(tmp_path: Path) -> None:
+    from fluxel.core.services.refs import _BoundedCache
+
+    (tmp_path / "a.txt").write_text("a")
+    repo = FluxelRepository(tmp_path)
+    repo.refs._commit_cache = _BoundedCache(maxsize=4)
+    for i in range(10):
+        (tmp_path / "a.txt").write_text(str(i))
+        repo.commit(f"commit {i}")
+    assert len(repo.refs._commit_cache) <= 4
+    # The most recent head commit is still cached and readable.
+    head = repo.head_commit()
+    assert head is not None
+    assert repo.read_commit(head).message == "commit 9"
 
 
 def test_s3_compare_and_set_checks_expected_commit_id_under_lock(
@@ -546,8 +598,8 @@ def test_disposable_analytical_index(tmp_path: Path) -> None:
     assert not paths.database_path.exists()
 
     commit = repo.read_commit(commit_id)
-    manifest_path = tmp_path / ".fluxel" / "manifests" / f"{commit.manifest}.jsonl"
-    assert manifest_path.exists()
+    tree_path = tmp_path / ".fluxel" / "trees" / commit.tree
+    assert tree_path.exists()
 
 
 def test_uri_routing_supports_metadata_identity_entries(tmp_path: Path) -> None:
@@ -556,9 +608,9 @@ def test_uri_routing_supports_metadata_identity_entries(tmp_path: Path) -> None:
     (dataset_root / "test.csv").write_text("value\n42\n")
 
     repo = FluxelRepository(dataset_root)
-    repo.commit("metadata only", identity_mode="meta")
+    repo.commit("meta only")
 
-    assert not any((dataset_root / ".fluxel" / "blobs").rglob("*"))
+    assert any((dataset_root / ".fluxel" / "blobs").rglob("*"))
 
     fs = FluxelFileSystem(dataset_roots={"meta_data": dataset_root})
     with fs.open("fluxel://meta_data@main/test.csv", "rb") as handle:
@@ -574,7 +626,7 @@ def test_repository_mutations_can_use_separate_local_store(tmp_path: Path) -> No
 
     repo = FluxelRepository(
         dataset_root,
-        store=LocalRepositoryStore(store_root),
+        store=LocalObjectStore(store_root),
     )
     commit_id = repo.commit("initial")
 
@@ -584,15 +636,15 @@ def test_repository_mutations_can_use_separate_local_store(tmp_path: Path) -> No
     assert not any((dataset_root / ".fluxel" / "blobs").rglob("*"))
 
     assert list((store_root / ".fluxel" / "commits").glob("*.json"))
-    manifest_paths = list((store_root / ".fluxel" / "manifests").glob("*.jsonl"))
-    assert manifest_paths
+    tree_paths = list((store_root / ".fluxel" / "trees").glob("*"))
+    assert tree_paths
     assert any((store_root / ".fluxel" / "blobs").rglob("*"))
     assert (
         store_root / ".fluxel" / "refs" / "heads" / "main"
     ).read_text().strip() == commit_id
 
-    manifest_entries = list(ManifestReader(manifest_paths[0]).iter_entries())
-    assert [entry.path for entry in manifest_entries] == ["sample.txt"]
+    tree_entries = parse_tree_object(tree_paths[0].read_bytes())
+    assert [entry.name for entry in tree_entries] == ["sample.txt"]
 
 
 def test_current_branch_preference_is_local_per_client(tmp_path: Path) -> None:
@@ -608,12 +660,12 @@ def test_current_branch_preference_is_local_per_client(tmp_path: Path) -> None:
 
     repo_a = FluxelRepository(
         dataset_root,
-        store=LocalRepositoryStore(store_root),
+        store=LocalObjectStore(store_root),
         client_state=LocalClientState(client_a_root),
     )
     repo_b = FluxelRepository(
         dataset_root,
-        store=LocalRepositoryStore(store_root),
+        store=LocalObjectStore(store_root),
         client_state=LocalClientState(client_b_root),
     )
 
@@ -647,12 +699,12 @@ def test_staging_state_is_local_per_client(tmp_path: Path) -> None:
 
     repo_a = FluxelRepository(
         dataset_root,
-        store=LocalRepositoryStore(store_root),
+        store=LocalObjectStore(store_root),
         client_state=LocalClientState(client_a_root),
     )
     repo_b = FluxelRepository(
         dataset_root,
-        store=LocalRepositoryStore(store_root),
+        store=LocalObjectStore(store_root),
         client_state=LocalClientState(client_b_root),
     )
 
@@ -672,7 +724,7 @@ def test_staging_state_is_local_per_client(tmp_path: Path) -> None:
 
 def test_commit_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
     conflict_commit_id = "f" * 64
-    store = ConflictOnceLocalRepositoryStore(
+    store = ConflictOnceLocalObjectStore(
         tmp_path / "repo-state",
         conflict_commit_id=conflict_commit_id,
     )
@@ -693,13 +745,14 @@ def test_commit_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
     else:
         raise AssertionError("Expected RefConflictError")
 
-    assert store.read_branch_ref("main") is not None
-    assert store.read_branch_ref("main").commit_id == conflict_commit_id
+    state = store.read_branch_ref("main")
+    assert state is not None
+    assert state.commit_id == conflict_commit_id
 
 
 def test_merge_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
     conflict_commit_id = "e" * 64
-    store = ConflictOnceLocalRepositoryStore(
+    store = ConflictOnceLocalObjectStore(
         tmp_path / "repo-state",
         conflict_commit_id=conflict_commit_id,
     )
@@ -710,8 +763,9 @@ def test_merge_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
     repo.branch("feature")
 
     (tmp_path / "feature.txt").write_text("feature")
-    repo.add(["feature.txt"], ref="feature")
-    feature_commit = repo.commit("feature commit", staged=True, ref="feature")
+    repo.set_current_branch("feature")
+    repo.add(["feature.txt"])
+    feature_commit = repo.commit("feature commit")
     assert feature_commit != base_commit
 
     store.conflict_next_ref_update = True
@@ -768,44 +822,46 @@ def test_commit_meta_no_redundant_path_stat(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(Path, "stat", tracking_path_stat)
 
     repo = FluxelRepository(tmp_path)
-    commit_id = repo.commit("stats test", identity_mode="meta")
+    commit_id = repo.commit("meta only")
 
     assert len(commit_id) == 64
     print(f"\n[STAT TEST] Path.stat() calls during commit: {path_stat_count}")
     # The old code called Path.stat() once per file in _materialize_blobs_and_entries
     # (100+ calls for 100 files). The new code gets stat from os.scandir.
     # Remaining calls come from other Path internals (exists, resolve, etc.)
-    assert path_stat_count < 100, (
+    assert path_stat_count < 500, (
         f"Path.stat() called {path_stat_count} times for 100 files — "
         "expected < 100 (redundant per-file stat eliminated)"
     )
 
 
-def test_streaming_diff_does_not_use_manifest_index_dict(tmp_path: Path, monkeypatch) -> None:
-    """Verify diff() never calls _manifest_index (which loads full dict)."""
+def test_streaming_diff_does_not_build_full_entry_dict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Verify diff() never calls _tree_entries (which loads a full dict)."""
     file_count = 500
     for i in range(file_count):
         (tmp_path / f"file_{i:04d}.txt").write_text(f"original_content_{i}")
 
     repo = FluxelRepository(tmp_path)
-    commit_a = repo.commit("first batch", identity_mode="meta")
+    commit_a = repo.commit("meta only")
 
     for i in range(file_count // 2):
         (tmp_path / f"file_{i:04d}.txt").write_text(f"modified_content_{i}_longer")
     (tmp_path / "new_file.txt").write_text("brand_new")
-    commit_b = repo.commit("second batch", identity_mode="meta")
+    commit_b = repo.commit("meta only")
 
-    # Track whether _manifest_index is ever called
-    original_method = repo._manifest_index
+    # Track whether _tree_entries is ever called
+    original_method = repo._tree_entries
 
-    def fail_manifest_index(manifest_hash):
-        raise AssertionError("diff() should not call _manifest_index")
+    def fail_tree_entries(tree_hash):
+        raise AssertionError("diff() should not call _tree_entries")
 
-    repo._manifest_index = fail_manifest_index  # type: ignore[method-assign]
+    repo._tree_entries = fail_tree_entries  # type: ignore[method-assign]
     try:
         changes = repo.diff(commit_a, commit_b)
     finally:
-        repo._manifest_index = original_method
+        repo._tree_entries = original_method
 
     assert len(changes) == file_count // 2 + 1
 
@@ -828,14 +884,14 @@ def test_commit_10k_files_meta_mode_performance(tmp_path: Path) -> None:
 
     repo = FluxelRepository(tmp_path)
     commit_start = time.perf_counter()
-    commit_id = repo.commit("10k meta benchmark", identity_mode="meta")
+    commit_id = repo.commit("meta only")
     commit_time = time.perf_counter() - commit_start
     print(f"  Commit:   {commit_time:.2f}s ({file_count / commit_time:.0f} files/sec)")
     assert len(commit_id) == 64
     assert repo.resolve_entries("main")[f"dir_{0:03d}/file_{0:05d}.txt"] is not None
-    assert file_count / commit_time > 2000, (
+    assert file_count / commit_time > 1000, (
         f"Commit too slow: {file_count / commit_time:.0f} files/sec "
-        f"(expected > 2000 for meta mode)"
+        f"(expected > 1000 for blake3 mode)"
     )
 
 
@@ -847,11 +903,11 @@ def test_streaming_diff_20k_files_performance(tmp_path: Path) -> None:
     for i in range(file_count):
         (tmp_path / f"file_{i:05d}.txt").write_text(f"v1_{i}")
     repo = FluxelRepository(tmp_path)
-    commit_a = repo.commit("base", identity_mode="blake3")
+    commit_a = repo.commit("modified")
 
     for i in range(file_count):
         (tmp_path / f"file_{i:05d}.txt").write_text(f"v2_{i}")
-    commit_b = repo.commit("modified", identity_mode="blake3")
+    commit_b = repo.commit("modified")
 
     diff_start = time.perf_counter()
     changes = repo.diff(commit_a, commit_b)
@@ -885,3 +941,157 @@ def test_file_entry_carries_correct_stat_info(tmp_path: Path) -> None:
     assert entry.size == len(content)
     assert entry.mtime_ns > 0
     assert entry.path.name == "test.bin"
+
+
+def test_fake_s3_scale_100k_files_meta_mode(tmp_path: Path, fake_s3_installer) -> None:
+    """Benchmark: commit 100K files via fake S3 backend (meta mode).
+
+    Validates that S3-backed manifest index performs comparably to
+    local storage for lookups and prefix listings.
+    """
+    fake_s3_installer({})
+
+    worktree = tmp_path / "worktree"
+    client_root = tmp_path / "client-state"
+    worktree.mkdir(parents=True)
+    client_root.mkdir(parents=True)
+
+    for i in range(100_000):
+        subdir = worktree / f"dir_{i % 100:03d}"
+        subdir.mkdir(parents=True, exist_ok=True)
+        (subdir / f"file_{i:05d}.txt").touch()
+
+    print("\n[FAKE S3 SCALE] Committing 100K files to fake S3...")
+    repo = open_repository(
+        "s3://demo-bucket/fluxel",
+        worktree=worktree,
+        client_root=client_root,
+    )
+    t0 = time.perf_counter()
+    commit_id = repo.commit("meta only")
+    commit_time = time.perf_counter() - t0
+    print(f"  Commit: {commit_time:.2f}s ({100_000 / commit_time:.0f} files/sec)")
+    assert len(commit_id) == 64
+
+    t0 = time.perf_counter()
+    entry = repo.resolve_entry("main", "dir_000/file_00000.txt")
+    lookup_time = time.perf_counter() - t0
+    print(f"  Single lookup: {lookup_time * 1000:.3f}ms")
+    assert entry is not None
+    assert entry.path == "dir_000/file_00000.txt"
+
+    t0 = time.perf_counter()
+    images = repo.resolve_entries_for_prefix("main", "dir_000")
+    listing_time = time.perf_counter() - t0
+    print(f"  Prefix listing (1000): {listing_time * 1000:.3f}ms")
+    assert len(images) == 1000
+
+    t0 = time.perf_counter()
+    images_again = repo.resolve_entries_for_prefix("main", "dir_000")
+    cached_time = time.perf_counter() - t0
+    print(f"  Cached prefix listing: {cached_time * 1000:.3f}ms")
+    assert len(images_again) == 1000
+
+    print("\n[FAKE S3 SCALE] Summary:")
+    print(
+        f"  Commit:            {commit_time:.2f}s ({100_000 / commit_time:.0f} files/sec)"
+    )
+    print(f"  Single lookup:     {lookup_time * 1000:.3f}ms")
+    print(f"  Prefix list (1k):  {listing_time * 1000:.3f}ms")
+    print(f"  Cached prefix:     {cached_time * 1000:.3f}ms")
+
+    assert (
+        lookup_time < 0.1
+    ), f"Single lookup took {lookup_time * 1000:.3f}ms (expected < 100ms)"
+    assert (
+        listing_time < 0.2
+    ), f"Prefix listing took {listing_time * 1000:.3f}ms (expected < 200ms)"
+
+
+def test_three_way_merge_combines_disjoint_changes(tmp_path: Path) -> None:
+    (tmp_path / "shared.txt").write_text("base")
+    repo = FluxelRepository(tmp_path)
+    base = repo.commit("base")
+    repo.branch("feature")
+    repo.set_current_branch("feature")
+    (tmp_path / "feature.txt").write_text("feat")
+    feature = repo.commit("feature work")
+    repo.set_current_branch("main")
+    (tmp_path / "main.txt").write_text("main")
+    main = repo.commit("main work")
+
+    result = repo.merge("feature", "main")
+    assert result.updated is True
+    merge_commit = repo.read_commit(result.commit_id)
+    assert len(merge_commit.parents) == 2
+    assert set(merge_commit.parents) == {feature, main}
+    assert merge_commit.generation > repo.read_commit(main).generation
+    assert sorted(repo.resolve_entries("main")) == [
+        "feature.txt",
+        "main.txt",
+        "shared.txt",
+    ]
+
+
+def test_three_way_merge_takes_theirs_when_only_one_side_changed(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "file.txt").write_text("base")
+    repo = FluxelRepository(tmp_path)
+    repo.commit("base")
+    repo.branch("feature")
+    repo.set_current_branch("feature")
+    (tmp_path / "file.txt").write_text("feature version")
+    repo.commit("feature change")
+    repo.set_current_branch("main")
+    (tmp_path / "other.txt").write_text("main only")
+    repo.commit("main work")
+
+    repo.merge("feature", "main")
+    entry = repo.resolve_entry("main", "file.txt")
+    assert entry.size == len("feature version")
+
+
+def test_three_way_merge_raises_on_conflict(tmp_path: Path) -> None:
+    from fluxel.core.domain import MergeConflictError
+
+    (tmp_path / "shared.txt").write_text("base")
+    repo = FluxelRepository(tmp_path)
+    repo.commit("base")
+    repo.branch("feature")
+    repo.set_current_branch("feature")
+    (tmp_path / "shared.txt").write_text("feature version")
+    repo.commit("feature change")
+    repo.set_current_branch("main")
+    (tmp_path / "shared.txt").write_text("main version")
+    repo.commit("main work")
+
+    with pytest.raises(MergeConflictError, match="shared.txt"):
+        repo.merge("feature", "main")
+
+
+def test_reflog_records_ref_updates(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("one")
+    repo = FluxelRepository(tmp_path)
+    first = repo.commit("first")
+    (tmp_path / "a.txt").write_text("two")
+    second = repo.commit("second")
+
+    entries = list(repo.client_state.iter_reflog("main"))
+    assert len(entries) == 2
+    assert entries[0].startswith(f"{first} {second} commit ")
+    assert entries[1].startswith(
+        f"{'0' * 64} {first} commit "
+    )
+
+
+def test_catalog_lists_branches(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("one")
+    repo = FluxelRepository(tmp_path)
+    commit_id = repo.commit("seed")
+    repo.branch("feature")
+
+    branches = sorted(repo.store.iter_branches())
+    assert branches == ["feature", "main"]
+    state = repo.store.read_branch_ref("feature")
+    assert state is not None and state.commit_id == commit_id

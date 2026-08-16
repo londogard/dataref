@@ -1,0 +1,22 @@
+[SCALE TEST] Performance Summary:
+  Generate 1M files:       151.99s (6579 files/sec)
+  Commit + tree build:     52.33s (19108 files/sec)
+  Single lookup:           10.580ms
+  Prefix list (200):       4.811ms
+  Bulk metadata (200):     0.037ms
+  Cached prefix list:      5.057ms
+
+[SCALE TEST] Performance Summary (v2 tree model)
+
+Targets (docs/architecture.md §3 — lock into the 1M-file S3 scale test):
+  Exact-path lookup, warm (cached tree prefixes):  < 20 ms
+  Exact-path lookup, cold worst case (depth GETs):  <= ~200 ms
+  Prefix listing, 200 files (cold):                 < 50 ms
+  Prefix listing, 10k files (cold):                 < 300 ms
+  Derived-manifest point lookup:                    < 10 ms
+
+Measured locally (200k files, meta mode, 2026-08-05):
+  Commit + tree build:       4.14s (48283 files/sec)
+
+Previous v1 measurement (stale — pre-Merkle-tree commit path):
+  Commit + manifest:       62.11s (16101 files/sec)  @ 1M files (S3 scale test)
