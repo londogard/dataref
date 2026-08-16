@@ -2,9 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on Keep a Changelog, and Dataref currently tracks changes before its first public beta release.
+The format is based on Keep a Changelog, and Dataref currently tracks changes before its first public alpha release.
 
 ## Unreleased
+
+## [0.1.0] - 2026-08-16
 
 ### Added
 
@@ -32,7 +34,7 @@ The format is based on Keep a Changelog, and Dataref currently tracks changes be
 - Streaming S3 import with metadata identity mode and repeatable path filters.
 - Staged add support for arbitrary local files, directories, S3 objects, and S3 prefixes.
 - Real S3 integration coverage for remote repository flows.
-- AGPL-3.0-or-later licensing, attribution notice, and funding metadata for the first public beta.
+- AGPL-3.0-or-later licensing, attribution notice, and funding metadata for the first public release.
 - **Tree-based object model (v2, P0 of `docs/architecture.md`)**: commits now
   build Merkle tree DAGs (`trees/`) instead of full JSONL manifests. Exact
   lookups descend the path chain through a client-side content-addressed
@@ -86,19 +88,6 @@ The format is based on Keep a Changelog, and Dataref currently tracks changes be
   semantics); deletions require explicit staging, as before.
 - Commit creation is faster than v1 in metadata mode (no per-file entry
   objects; ~48k files/sec on the 200k-file meta benchmark).
-
-### Removed
-
-- Removed `manifest_index.py`, `manifest_query.py`, `.idx` sidecars, the
-  embedded manifest index, and the index/fallback decision tree.
-
-### Fixed
-
-- Manifest parsing now validates entry shape, digests, and metadata-only invariants with line-aware errors.
-- Commit creation is back to near-pre-refactor throughput: the commit hot loop now streams serialized manifest lines from the worktree instead of constructing and validating a `ManifestEntry` object per file (~2× faster for metadata-only commits; validated again on read).
-
-### Changed
-
 - CLI examples and tests now prefer `--repo` repository selection semantics.
 - Client-local state writes now use atomic replace semantics for HEAD and staging payloads.
 - Manifest index prefix iteration now streams rows instead of materializing full result sets.
@@ -113,6 +102,7 @@ The format is based on Keep a Changelog, and Dataref currently tracks changes be
 
 ### Removed
 
+- Removed `manifest_index.py`, `manifest_query.py`, `.idx` sidecars, the embedded manifest index, and the index/fallback decision tree.
 - Removed the `dataref import` command; S3 ingress is now staged via `dataref add ... s3://... [--identity meta --as ...]` followed by `dataref commit --staged`.
 - Removed `--identity` from `dataref commit`; the commit identity mode is now configured with `dataref config set identity meta`, or set per stage with `dataref add --identity ...`.
 - Removed the direct-commit `-m/--message` flag from `dataref rm` and `dataref mv`; metadata-only mutations are staged and committed with `dataref commit --staged`.
