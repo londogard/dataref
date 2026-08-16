@@ -149,7 +149,7 @@ def fake_s3_installer(monkeypatch: pytest.MonkeyPatch):
             }
         )
         monkeypatch.setattr(
-            "fluxel.core.objects.boto3.client", lambda service_name: client
+            "dataref.core.objects.boto3.client", lambda service_name: client
         )
         return client
 
@@ -157,26 +157,26 @@ def fake_s3_installer(monkeypatch: pytest.MonkeyPatch):
 
 
 def _integration_config() -> dict[str, str]:
-    endpoint = os.getenv("FLUXEL_MINISTACK_ENDPOINT")
+    endpoint = os.getenv("DATAREF_MINISTACK_ENDPOINT")
     if not endpoint:
-        pytest.skip("Set FLUXEL_MINISTACK_ENDPOINT to run S3 integration tests")
+        pytest.skip("Set DATAREF_MINISTACK_ENDPOINT to run S3 integration tests")
 
-    access_key = os.getenv("FLUXEL_MINISTACK_ACCESS_KEY") or os.getenv(
+    access_key = os.getenv("DATAREF_MINISTACK_ACCESS_KEY") or os.getenv(
         "AWS_ACCESS_KEY_ID"
     )
-    secret_key = os.getenv("FLUXEL_MINISTACK_SECRET_KEY") or os.getenv(
+    secret_key = os.getenv("DATAREF_MINISTACK_SECRET_KEY") or os.getenv(
         "AWS_SECRET_ACCESS_KEY"
     )
     if not access_key or not secret_key:
         pytest.skip(
-            "Set FLUXEL_MINISTACK_ACCESS_KEY/SECRET_KEY or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
+            "Set DATAREF_MINISTACK_ACCESS_KEY/SECRET_KEY or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
         )
 
     return {
         "endpoint": endpoint,
         "access_key": access_key,
         "secret_key": secret_key,
-        "region": os.getenv("FLUXEL_MINISTACK_REGION", "us-east-1"),
+        "region": os.getenv("DATAREF_MINISTACK_REGION", "us-east-1"),
     }
 
 
@@ -196,13 +196,13 @@ def ministack_client(monkeypatch: pytest.MonkeyPatch):
     except (EndpointConnectionError, BotoCoreError, ClientError) as error:
         pytest.skip(f"S3 integration endpoint unavailable: {error}")
 
-    monkeypatch.setattr("fluxel.core.objects.boto3.client", lambda service_name: client)
+    monkeypatch.setattr("dataref.core.objects.boto3.client", lambda service_name: client)
     return client
 
 
 @pytest.fixture
 def s3_repo_root(ministack_client) -> Generator[str, None, None]:
-    bucket = f"fluxel-it-{uuid4().hex[:20]}"
+    bucket = f"dataref-it-{uuid4().hex[:20]}"
     prefix = f"repos/{uuid4().hex}"
     ministack_client.create_bucket(Bucket=bucket)
     try:

@@ -1,6 +1,6 @@
-"""Operation methods extracted from FluxelRepository.
+"""Operation methods extracted from DatarefRepository.
 
-Each function takes a FluxelRepository as its first argument and implements
+Each function takes a DatarefRepository as its first argument and implements
 one of the larger "operation" methods that were previously methods on the class.
 All metadata mutations build trees (``TreeWriter``) instead of rewriting full
 manifests; unchanged subtrees are reused by content-addressing.
@@ -24,7 +24,7 @@ from .repository_support import (
 
 if TYPE_CHECKING:
     from .repository import (
-        FluxelRepository,
+        DatarefRepository,
         MoveResult,
         RemoveResult,
         StageStatus,
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 def repo_add(
-    repo: FluxelRepository,
+    repo: DatarefRepository,
     paths: list[str],
     *,
     ref: str | None = None,
@@ -63,7 +63,7 @@ def repo_add(
 
 
 def repo_import_s3(
-    repo: FluxelRepository,
+    repo: DatarefRepository,
     source_uri: str,
     message: str,
     identity_mode: Literal["blake3", "meta"] = "blake3",
@@ -112,7 +112,7 @@ def repo_import_s3(
 
 
 def repo_rm(
-    repo: FluxelRepository, paths: list[str], *, ref: str | None = None
+    repo: DatarefRepository, paths: list[str], *, ref: str | None = None
 ) -> StageStatus:
     branch = ref or repo.current_branch()
     repo.refs.ensure_branch_exists(branch)
@@ -126,7 +126,7 @@ def repo_rm(
 
 
 def repo_remove_paths(
-    repo: FluxelRepository,
+    repo: DatarefRepository,
     paths: list[str],
     message: str,
     *,
@@ -171,7 +171,7 @@ def repo_remove_paths(
 
 
 def repo_move(
-    repo: FluxelRepository,
+    repo: DatarefRepository,
     source_path: str,
     destination_path: str,
     message: str,
@@ -250,7 +250,7 @@ def repo_move(
 
 
 def repo_move_staged(
-    repo: FluxelRepository,
+    repo: DatarefRepository,
     source_path: str,
     destination_path: str,
     *,
@@ -304,7 +304,7 @@ def repo_move_staged(
 
 
 def repo_verify(
-    repo: FluxelRepository,
+    repo: DatarefRepository,
     ref: str | None = None,
     path_prefixes: list[str] | None = None,
     *,
@@ -397,7 +397,7 @@ def repo_verify(
 
 
 def repo_restore_files(
-    repo: FluxelRepository,
+    repo: DatarefRepository,
     ref: str,
     paths: list[str] | None = None,
     *,
@@ -437,7 +437,7 @@ def repo_restore_files(
 
 
 def repo_generate_transfer_commands(
-    repo: FluxelRepository,
+    repo: DatarefRepository,
     ref: str | None = None,
     *,
     mode: str = "upload",

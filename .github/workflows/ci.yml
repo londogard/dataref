@@ -34,7 +34,7 @@ jobs:
               run: uv run pytest tests -m "not integration"
 
             - name: Smoke-test CLI help
-              run: uv run fluxel --help
+              run: uv run dataref --help
 
             - name: Build package
               run: uv build
@@ -98,14 +98,14 @@ jobs:
                   WHEEL=$(ls dist/*.whl | head -1)
                   python -m venv /tmp/smoke-venv
                   /tmp/smoke-venv/bin/pip install "$WHEEL"
-                  echo "=== fluxel --help ==="
-                  /tmp/smoke-venv/bin/fluxel --help
-                  echo "=== fluxel --version ==="
-                  /tmp/smoke-venv/bin/fluxel --version 2>/dev/null || true
+                  echo "=== dataref --help ==="
+                  /tmp/smoke-venv/bin/dataref --help
+                  echo "=== dataref --version ==="
+                  /tmp/smoke-venv/bin/dataref --version 2>/dev/null || true
                   echo "=== basic commit smoke ==="
                   TMPDIR=$(mktemp -d)
                   echo "smoke-test-content" > "$TMPDIR/smoke.txt"
-                  /tmp/smoke-venv/bin/fluxel commit --repo "$TMPDIR" -m "smoke" > /dev/null
+                  /tmp/smoke-venv/bin/dataref commit --repo "$TMPDIR" -m "smoke" > /dev/null
                   echo "Isolated install smoke test passed."
 
     release-gate:

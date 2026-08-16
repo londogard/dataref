@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 import pytest
 
-from fluxel import (
-    FluxelFileSystem,
+from dataref import (
+    DatarefFileSystem,
     NotARepositoryError,
     S3ObjectStore,
     cat,
@@ -22,16 +22,16 @@ from fluxel import (
 
 
 def test_top_level_exports_and_star_import() -> None:
-    import fluxel
+    import dataref
 
-    assert hasattr(fluxel, "parse_where_clause")
-    assert hasattr(fluxel, "plan_pruned_scan")
-    assert hasattr(fluxel, "prune_row_groups")
-    assert hasattr(fluxel, "cat")
-    assert hasattr(fluxel, "catalog")
-    assert hasattr(fluxel, "gc")
-    assert hasattr(fluxel, "reflog")
-    assert hasattr(fluxel, "NotARepositoryError")
+    assert hasattr(dataref, "parse_where_clause")
+    assert hasattr(dataref, "plan_pruned_scan")
+    assert hasattr(dataref, "prune_row_groups")
+    assert hasattr(dataref, "cat")
+    assert hasattr(dataref, "catalog")
+    assert hasattr(dataref, "gc")
+    assert hasattr(dataref, "reflog")
+    assert hasattr(dataref, "NotARepositoryError")
 
 
 def test_s3_atomic_cas_conditional_write(fake_s3_installer) -> None:
@@ -72,18 +72,18 @@ def test_vfs_s3_dataset_roots(
     (tmp_path / "data.txt").write_text("s3 dataset content")
     assert run_cli(["commit", "--repo", repo_uri, "-m", "remote seed"]) == 0
 
-    fs = FluxelFileSystem(dataset_roots={"remote": repo_uri})
+    fs = DatarefFileSystem(dataset_roots={"remote": repo_uri})
     # Check that dataset_roots preserves the s3:// URI
     assert fs.dataset_roots["remote"] == repo_uri
 
     # Read file via fsspec
-    with fs.open("fluxel://remote@main/data.txt", "rb") as handle:
+    with fs.open("dataref://remote@main/data.txt", "rb") as handle:
         assert handle.read() == b"s3 dataset content"
 
     # List files via fsspec
-    entries = fs.ls("fluxel://remote@main/")
+    entries = fs.ls("dataref://remote@main/")
     assert len(entries) == 1
-    assert entries[0]["name"] == "fluxel://remote@main/data.txt"
+    assert entries[0]["name"] == "dataref://remote@main/data.txt"
 
 
 def test_standalone_convenience_functions(tmp_path: Path) -> None:
@@ -118,7 +118,7 @@ def test_not_a_repository_validation(tmp_path: Path, capsys) -> None:
 
     assert run_cli(["status", "--repo", str(empty_dir)]) == 1
     err = capsys.readouterr().err
-    assert "not a fluxel repository" in err
+    assert "not a dataref repository" in err
 
     with pytest.raises(NotARepositoryError):
         open_repository(empty_dir, must_exist=True)

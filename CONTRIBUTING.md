@@ -2,11 +2,11 @@
 
 ## Development Setup
 
-Fluxel uses `uv` for dependency management and local commands.
+Dataref uses `uv` for dependency management and local commands.
 
 ```bash
 uv sync --group dev
-uv run fluxel --help
+uv run dataref --help
 ```
 
 ## Local Validation
@@ -20,25 +20,25 @@ uv run pytest tests
 Run only the real S3 integration tests against Ministack:
 
 ```bash
-export FLUXEL_MINISTACK_ENDPOINT=http://127.0.0.1:9000
-export FLUXEL_MINISTACK_ACCESS_KEY=ministack
-export FLUXEL_MINISTACK_SECRET_KEY=ministack123
-export FLUXEL_MINISTACK_REGION=us-east-1
+export DATAREF_MINISTACK_ENDPOINT=http://127.0.0.1:9000
+export DATAREF_MINISTACK_ACCESS_KEY=ministack
+export DATAREF_MINISTACK_SECRET_KEY=ministack123
+export DATAREF_MINISTACK_REGION=us-east-1
 
 uv run pytest tests/test_s3_integration.py -m integration
 ```
 
-If `FLUXEL_MINISTACK_ENDPOINT` is unset or unreachable, the integration tests skip automatically.
+If `DATAREF_MINISTACK_ENDPOINT` is unset or unreachable, the integration tests skip automatically.
 
 ## Project Expectations
 
-- Fluxel is licensed under AGPL-3.0-or-later; preserve the license and notice files in redistributions.
+- Dataref is licensed under AGPL-3.0-or-later; preserve the license and notice files in redistributions.
 - Prefer Python type hints by default.
-- Keep Fluxel client-first: no server, daemon, or central database.
+- Keep Dataref client-first: no server, daemon, or central database.
 - Keep canonical blob storage simple and immutable.
 - Metadata-only operations must not read blob payloads.
 - Prefer stream-safe, O(1)-memory patterns when working with manifests and large imports.
-- Use Blake3 for Fluxel content and identity hashing.
+- Use Blake3 for Dataref content and identity hashing.
 
 ## Pull Requests
 

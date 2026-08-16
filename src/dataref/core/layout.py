@@ -7,9 +7,9 @@ from .config import LocalConfig
 
 
 @dataclass(frozen=True)
-class FluxelLayout:
+class DatarefLayout:
     root: Path
-    fluxel_dir: Path
+    dataref_dir: Path
     blobs_dir: Path
     commits_dir: Path
     trees_dir: Path
@@ -20,16 +20,16 @@ class FluxelLayout:
     heads_dir: Path
 
     @classmethod
-    def initialize(cls, root: str | Path) -> "FluxelLayout":
+    def initialize(cls, root: str | Path) -> "DatarefLayout":
         root_path = Path(root).resolve()
-        fluxel_dir = root_path / ".fluxel"
-        blobs_dir = fluxel_dir / "blobs"
-        commits_dir = fluxel_dir / "commits"
-        trees_dir = fluxel_dir / "trees"
-        footers_dir = fluxel_dir / "footers"
-        manifests_dir = fluxel_dir / "manifests"
-        staging_dir = fluxel_dir / "staging"
-        refs_dir = fluxel_dir / "refs"
+        dataref_dir = root_path / ".dataref"
+        blobs_dir = dataref_dir / "blobs"
+        commits_dir = dataref_dir / "commits"
+        trees_dir = dataref_dir / "trees"
+        footers_dir = dataref_dir / "footers"
+        manifests_dir = dataref_dir / "manifests"
+        staging_dir = dataref_dir / "staging"
+        refs_dir = dataref_dir / "refs"
         heads_dir = refs_dir / "heads"
 
         for path in (
@@ -46,7 +46,7 @@ class FluxelLayout:
 
         return cls(
             root=root_path,
-            fluxel_dir=fluxel_dir,
+            dataref_dir=dataref_dir,
             blobs_dir=blobs_dir,
             commits_dir=commits_dir,
             trees_dir=trees_dir,
@@ -58,9 +58,9 @@ class FluxelLayout:
         )
 
 
-def initialize_fluxel_layout(root: str | Path) -> FluxelLayout:
-    layout = FluxelLayout.initialize(root)
-    config_path = layout.fluxel_dir / "config.json"
+def initialize_dataref_layout(root: str | Path) -> DatarefLayout:
+    layout = DatarefLayout.initialize(root)
+    config_path = layout.dataref_dir / "config.json"
     if not config_path.exists():
         default_config = LocalConfig(dataset_root=str(layout.root))
         default_config.save(layout.root)

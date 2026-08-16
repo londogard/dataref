@@ -26,12 +26,12 @@ class BaseConfig(msgspec.Struct, tag_field="backend"):
             if self.format_version > CURRENT_FORMAT_VERSION:
                 raise ValueError(
                     f"Repository format version {self.format_version} is newer than "
-                    f"this version of fluxel (supports {CURRENT_FORMAT_VERSION}). "
-                    f"Please upgrade fluxel to access this repository."
+                    f"this version of dataref (supports {CURRENT_FORMAT_VERSION}). "
+                    f"Please upgrade dataref to access this repository."
                 )
             raise ValueError(
                 f"Repository format version {self.format_version} is no longer supported. "
-                f"Run 'fluxel migrate' to upgrade the repository."
+                f"Run 'dataref migrate' to upgrade the repository."
             )
         if not self.dataset_root:
             raise ValueError("dataset_root must not be empty")
@@ -39,14 +39,14 @@ class BaseConfig(msgspec.Struct, tag_field="backend"):
             raise ValueError("default_branch must not be empty")
 
     @staticmethod
-    def load(root: str | Path) -> FluxelConfig | None:
-        path = Path(root).resolve() / ".fluxel" / CONFIG_FILENAME
+    def load(root: str | Path) -> DatarefConfig | None:
+        path = Path(root).resolve() / ".dataref" / CONFIG_FILENAME
         if not path.exists():
             return None
-        return msgspec.json.decode(path.read_text("utf-8"), type=FluxelConfig)
+        return msgspec.json.decode(path.read_text("utf-8"), type=DatarefConfig)
 
     def save(self, root: str | Path) -> Path:
-        path = Path(root).resolve() / ".fluxel" / CONFIG_FILENAME
+        path = Path(root).resolve() / ".dataref" / CONFIG_FILENAME
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(msgspec.json.encode(self) + b"\n")
         return path
@@ -73,7 +73,7 @@ class S3Config(BaseConfig, tag="s3"):
             raise ValueError("S3 backend requires a bucket")
 
 
-FluxelConfig = LocalConfig | S3Config
+DatarefConfig = LocalConfig | S3Config
 
 
 def init_config(
@@ -84,12 +84,12 @@ def init_config(
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
     s3_endpoint_url: str | None = None,
-) -> FluxelConfig:
+) -> DatarefConfig:
     dataset_root = str(Path(root).resolve())
     if backend == "s3":
         if not s3_bucket:
             raise ValueError("S3 backend requires a bucket")
-        config: FluxelConfig = S3Config(
+        config: DatarefConfig = S3Config(
             dataset_root=dataset_root,
             default_branch=default_branch,
             bucket=s3_bucket,

@@ -9,21 +9,21 @@ import fsspec
 from fsspec.spec import AbstractFileSystem
 
 from ..manifest import ManifestEntry
-from ..repository import FluxelRepository, open_repository
+from ..repository import DatarefRepository, open_repository
 from ..repository_support import _validate_no_binary, normalize_repository_path
 from ..objects import open_source_uri
 
 
 @dataclass(frozen=True)
-class FluxelURI:
+class DatarefURI:
     dataset: str
     ref: str
     logical_path: str
     include_staging: bool = False
 
 
-class FluxelFileSystem(AbstractFileSystem):
-    protocol = "fluxel"
+class DatarefFileSystem(AbstractFileSystem):
+    protocol = "dataref"
 
     def __init__(
         self,
@@ -40,11 +40,11 @@ class FluxelFileSystem(AbstractFileSystem):
             )
             for name, root in (dataset_roots or {}).items()
         }
-        self._repositories: dict[str, FluxelRepository] = {}
+        self._repositories: dict[str, DatarefRepository] = {}
 
     @classmethod
     def _strip_protocol(cls, path: str) -> str:
-        return path[len("fluxel://") :] if path.startswith("fluxel://") else path
+        return path[len("dataref://") :] if path.startswith("dataref://") else path
 
     def _open(  # type: ignore[bad-override]
         self,
@@ -55,7 +55,7 @@ class FluxelFileSystem(AbstractFileSystem):
     ) -> IO[bytes]:
         if mode != "rb":
             raise NotImplementedError(
-                "FluxelFileSystem currently supports read-only binary mode"
+                "DatarefFileSystem currently supports read-only binary mode"
             )
         resolved = self._resolve_entry(path)
         if resolved.entry.blob_hash:
@@ -105,7 +105,7 @@ class FluxelFileSystem(AbstractFileSystem):
         )
         results: list[dict[str, object] | str] = []
         for entry in entries.values():
-            as_uri = f"fluxel://{uri.dataset}@{uri.ref}/{entry.path}"
+            as_uri = f"dataref://{uri.dataset}@{uri.ref}/{entry.path}"
             if detail:
                 results.append(
                     {
@@ -135,7 +135,7 @@ class FluxelFileSystem(AbstractFileSystem):
             raise FileNotFoundError(path)
         return ResolvedEntry(uri=uri, root=root, commit_id=commit_id, entry=entry)
 
-    def _repository(self, root: str | Path) -> FluxelRepository:
+    def _repository(self, root: str | Path) -> DatarefRepository:
         key = str(root)
         repo = self._repositories.get(key)
         if repo is None:
@@ -148,25 +148,25 @@ class FluxelFileSystem(AbstractFileSystem):
             return self.dataset_roots[dataset]
         _validate_uri_component(dataset, "dataset")
         if "/" in dataset or dataset in (".", ".."):
-            raise ValueError("Fluxel URI dataset cannot contain path separators")
-        raise FileNotFoundError(f"Unknown Fluxel dataset: {dataset}")
+            raise ValueError("Dataref URI dataset cannot contain path separators")
+        raise FileNotFoundError(f"Unknown Dataref dataset: {dataset}")
 
-    def _parse_uri(self, path: str, *, allow_empty_path: bool = False) -> FluxelURI:
+    def _parse_uri(self, path: str, *, allow_empty_path: bool = False) -> DatarefURI:
         stripped = self._strip_protocol(path)
         if not stripped:
-            raise ValueError("Fluxel URI cannot be empty")
+            raise ValueError("Dataref URI cannot be empty")
         if "@" not in stripped:
             raise ValueError(
-                "Fluxel URI must include a ref: fluxel://<dataset>@<ref>/<path>"
+                "Dataref URI must include a ref: dataref://<dataset>@<ref>/<path>"
             )
         dataset, remainder = stripped.split("@", maxsplit=1)
         _validate_uri_component(dataset, "dataset")
         if not dataset:
-            raise ValueError("Fluxel URI dataset cannot be empty")
+            raise ValueError("Dataref URI dataset cannot be empty")
         if "/" in dataset:
-            raise ValueError("Fluxel URI dataset cannot contain path separators")
+            raise ValueError("Dataref URI dataset cannot contain path separators")
         if dataset in (".", ".."):
-            raise ValueError("Fluxel URI dataset cannot be '.' or '..'")
+            raise ValueError("Dataref URI dataset cannot be '.' or '..'")
         if "/" in remainder:
             ref_raw, logical_path = remainder.split("/", maxsplit=1)
         else:
@@ -178,17 +178,17 @@ class FluxelFileSystem(AbstractFileSystem):
             ref = ref_raw[: -len("+staged")]
         _validate_uri_component(ref, "ref")
         if not ref:
-            raise ValueError("Fluxel URI ref cannot be empty")
+            raise ValueError("Dataref URI ref cannot be empty")
         if "/" in ref:
-            raise ValueError("Fluxel URI ref cannot contain path separators")
+            raise ValueError("Dataref URI ref cannot contain path separators")
         if ref in (".", ".."):
-            raise ValueError("Fluxel URI ref cannot be '.' or '..'")
+            raise ValueError("Dataref URI ref cannot be '.' or '..'")
         logical_path = logical_path.strip("/")
         if logical_path:
             logical_path = normalize_repository_path(logical_path)
         elif not allow_empty_path:
-            raise ValueError("Fluxel URI must include a logical file path")
-        return FluxelURI(
+            raise ValueError("Dataref URI must include a logical file path")
+        return DatarefURI(
             dataset=dataset,
             ref=ref,
             logical_path=logical_path,
@@ -197,12 +197,12 @@ class FluxelFileSystem(AbstractFileSystem):
 
 
 def _validate_uri_component(component: str, name: str) -> None:
-    _validate_no_binary(component, context=f"Fluxel URI {name}")
+    _validate_no_binary(component, context=f"Dataref URI {name}")
 
 
 @dataclass(frozen=True)
 class ResolvedEntry:
-    uri: FluxelURI
+    uri: DatarefURI
     root: str | Path
     commit_id: str
     entry: ManifestEntry
@@ -270,4 +270,4 @@ class _BlobReadFile(io.IOBase):
             super().close()
 
 
-fsspec.register_implementation("fluxel", FluxelFileSystem)
+fsspec.register_implementation("dataref", DatarefFileSystem)

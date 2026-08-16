@@ -1,6 +1,6 @@
-# Fluxel
+# Dataref
 
-Fluxel is a serverless (client-first), object-storage-first data versioning engine.
+Dataref is a serverless (client-first), object-storage-first data versioning engine.
 
 The design is deliberately opinionated: keep canonical data storage boring and immutable, and put intelligence in metadata and access layers.
 
@@ -14,7 +14,7 @@ The design is deliberately opinionated: keep canonical data storage boring and i
 
 ## Core Philosophy
 
-Fluxel separates the platform into three layers:
+Dataref separates the platform into three layers:
 
 1. **Canonical Layer (`blobs/`)**
 	- Content-addressed objects keyed by Blake3 digest.
@@ -23,31 +23,31 @@ Fluxel separates the platform into three layers:
 	- JSONL manifests map logical path -> identity + metadata.
 	- Commit objects (JSON) and branch refs provide Git-like lineage semantics.
 3. **Access Layer (`fsspec`)**
-	- `fluxel://<dataset>@<branch_or_commit>/<path>` resolves metadata, then reads either canonical blob bytes or source URI bytes for metadata-only entries.
+	- `dataref://<dataset>@<branch_or_commit>/<path>` resolves metadata, then reads either canonical blob bytes or source URI bytes for metadata-only entries.
 
 ## MVP Status (Current)
 
-Fluxel is intentionally in MVP mode.
+Dataref is intentionally in MVP mode.
 
 ### Implemented
 
-- Commit snapshots over a dataset root (`fluxel commit`).
+- Commit snapshots over a dataset root (`dataref commit`).
 - Repository URI support via `--repo <path|s3://bucket/prefix>` and `open_repository(...)`.
-- Repository initialization (`fluxel init`) with local or S3 backend.
-- Remote sync workflow (`fluxel fetch`, `fluxel pull`, `fluxel push`).
-- Operator-facing S3 lock inspection and cleanup (`fluxel lock list`, `fluxel lock cleanup`).
-- Streaming S3 ingress from `s3://` objects and prefixes via staged `fluxel add ... --identity meta --as ...` followed by `fluxel commit --staged`.
-- Branch-scoped staging workflow (`fluxel add`, `fluxel rm`, `fluxel status`, `fluxel commit --staged`).
+- Repository initialization (`dataref init`) with local or S3 backend.
+- Remote sync workflow (`dataref fetch`, `dataref pull`, `dataref push`).
+- Operator-facing S3 lock inspection and cleanup (`dataref lock list`, `dataref lock cleanup`).
+- Streaming S3 ingress from `s3://` objects and prefixes via staged `dataref add ... --identity meta --as ...` followed by `dataref commit --staged`.
+- Branch-scoped staging workflow (`dataref add`, `dataref rm`, `dataref status`, `dataref commit --staged`).
 - Incremental ingress paths that preserve existing manifest entries while adding only new content metadata/blobs.
 - Commit identity modes: `blake3` (default) and `meta` (`hash(path+size)`).
-- Verify command to promote metadata-only entries to canonical blobs (`fluxel verify`).
-- Zero-copy branch pointers (`fluxel branch`).
-- Fast-forward-only branch merge (`fluxel merge`).
-- Metadata-only diff between refs (`fluxel diff`).
-- Metadata-only manifest mutations for committed refs via the staged flow (`fluxel rm ...`, `fluxel mv ... ...`, then `fluxel commit --staged`).
-- File restoration from refs (`fluxel restore <ref> [--path ...] [--force]`).
-- Disposable analytical index from manifest (`fluxel index build`, DuckDB + optional Parquet export).
-- `fsspec` provider for `fluxel://` URI reads.
+- Verify command to promote metadata-only entries to canonical blobs (`dataref verify`).
+- Zero-copy branch pointers (`dataref branch`).
+- Fast-forward-only branch merge (`dataref merge`).
+- Metadata-only diff between refs (`dataref diff`).
+- Metadata-only manifest mutations for committed refs via the staged flow (`dataref rm ...`, `dataref mv ... ...`, then `dataref commit --staged`).
+- File restoration from refs (`dataref restore <ref> [--path ...] [--force]`).
+- Disposable analytical index from manifest (`dataref index build`, DuckDB + optional Parquet export).
+- `fsspec` provider for `dataref://` URI reads.
 - Local + S3 storage backend abstractions available in code.
 - Human-readable output by default; `--json` flag on all commands for programmatic use.
 
@@ -61,127 +61,127 @@ Fluxel is intentionally in MVP mode.
 
 ## Install
 ```bash
-uv pip install fluxel
+uv pip install dataref
 ```
 
 ### Developer mode in repo
 ```bash
 uv sync
-uv run fluxel --help
+uv run dataref --help
 ```
 
 ## License And Support
 
-Fluxel is licensed under the GNU Affero General Public License v3.0 or later.
+Dataref is licensed under the GNU Affero General Public License v3.0 or later.
 
 - The license keeps copyright and license notices attached to redistributed copies.
 - Modified networked deployments must make their corresponding source available under the AGPL terms.
-- That gives companies a practical reason to fund maintenance if they depend on Fluxel while keeping the project genuinely open source.
+- That gives companies a practical reason to fund maintenance if they depend on Dataref while keeping the project genuinely open source.
 
-If your company uses Fluxel, sponsor ongoing maintenance at <https://github.com/sponsors/londogard>.
+If your company uses Dataref, sponsor ongoing maintenance at <https://github.com/sponsors/londogard>.
 
 ## Quickstart
 
 ```bash
 # Initialize a new repository
-mkdir -p /tmp/fluxel-demo
-uv run fluxel init --repo /tmp/fluxel-demo
-# Or with S3 backend: uv run fluxel init --repo /tmp/fluxel-demo --backend s3 --s3-bucket my-bucket
+mkdir -p /tmp/dataref-demo
+uv run dataref init --repo /tmp/dataref-demo
+# Or with S3 backend: uv run dataref init --repo /tmp/dataref-demo --backend s3 --s3-bucket my-bucket
 
-echo "hello" > /tmp/fluxel-demo/a.txt
+echo "hello" > /tmp/dataref-demo/a.txt
 
-uv run fluxel commit --repo /tmp/fluxel-demo -m "initial"
+uv run dataref commit --repo /tmp/dataref-demo -m "initial"
 
 # Stage an S3 prefix as metadata-only entries, then commit the staged additions
-uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
-uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "metadata import"
-uv run fluxel verify --repo /tmp/fluxel-demo
+uv run dataref add --repo /tmp/dataref-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
+uv run dataref commit --repo /tmp/dataref-demo --staged -m "metadata import"
+uv run dataref verify --repo /tmp/dataref-demo
 
 # branch-scoped staged flow
-uv run fluxel branch --repo /tmp/fluxel-demo feature
-uv run fluxel checkout --repo /tmp/fluxel-demo feature
-uv run fluxel add --repo /tmp/fluxel-demo data/new.csv
-uv run fluxel add --repo /tmp/fluxel-demo --as imports/raw.csv /tmp/outside-repo/raw.csv
-uv run fluxel add --repo /tmp/fluxel-demo --as imports/bundle /tmp/outside-repo/bundle
-uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
-uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
-uv run fluxel status --repo /tmp/fluxel-demo
-uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "feature updates"
-uv run fluxel checkout --repo /tmp/fluxel-demo main
-uv run fluxel merge --repo /tmp/fluxel-demo feature main
+uv run dataref branch --repo /tmp/dataref-demo feature
+uv run dataref checkout --repo /tmp/dataref-demo feature
+uv run dataref add --repo /tmp/dataref-demo data/new.csv
+uv run dataref add --repo /tmp/dataref-demo --as imports/raw.csv /tmp/outside-repo/raw.csv
+uv run dataref add --repo /tmp/dataref-demo --as imports/bundle /tmp/outside-repo/bundle
+uv run dataref add --repo /tmp/dataref-demo --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
+uv run dataref add --repo /tmp/dataref-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
+uv run dataref status --repo /tmp/dataref-demo
+uv run dataref commit --repo /tmp/dataref-demo --staged -m "feature updates"
+uv run dataref checkout --repo /tmp/dataref-demo main
+uv run dataref merge --repo /tmp/dataref-demo feature main
 
 # restore files from a ref
-uv run fluxel restore --repo /tmp/fluxel-demo main
-uv run fluxel restore --repo /tmp/fluxel-demo main --path data/new.csv
-uv run fluxel restore --repo /tmp/fluxel-demo main --force
+uv run dataref restore --repo /tmp/dataref-demo main
+uv run dataref restore --repo /tmp/dataref-demo main --path data/new.csv
+uv run dataref restore --repo /tmp/dataref-demo main --force
 
-echo "hello v2" > /tmp/fluxel-demo/a.txt
-uv run fluxel commit --repo /tmp/fluxel-demo -m "update"
+echo "hello v2" > /tmp/dataref-demo/a.txt
+uv run dataref commit --repo /tmp/dataref-demo -m "update"
 
-uv run fluxel branch --repo /tmp/fluxel-demo experiment
-uv run fluxel diff --repo /tmp/fluxel-demo <from_ref> <to_ref>
+uv run dataref branch --repo /tmp/dataref-demo experiment
+uv run dataref diff --repo /tmp/dataref-demo <from_ref> <to_ref>
 
 # Stage and commit metadata mutations
-uv run fluxel rm --repo /tmp/fluxel-demo old-prefix
-uv run fluxel mv --repo /tmp/fluxel-demo raw/images curated/images
-uv run fluxel status --repo /tmp/fluxel-demo
-uv run fluxel commit --repo /tmp/fluxel-demo -m "clean up old files and rename image prefix"
+uv run dataref rm --repo /tmp/dataref-demo old-prefix
+uv run dataref mv --repo /tmp/dataref-demo raw/images curated/images
+uv run dataref status --repo /tmp/dataref-demo
+uv run dataref commit --repo /tmp/dataref-demo -m "clean up old files and rename image prefix"
 
 # Or stage the mutation and commit it with a single message
-uv run fluxel rm --repo /tmp/fluxel-demo logs/2025
-uv run fluxel mv --repo /tmp/fluxel-demo incoming/images curated/images
-uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "remove old logs and rename prefix"
+uv run dataref rm --repo /tmp/dataref-demo logs/2025
+uv run dataref mv --repo /tmp/dataref-demo incoming/images curated/images
+uv run dataref commit --repo /tmp/dataref-demo --staged -m "remove old logs and rename prefix"
 
 # remote repo metadata operations from the current working tree
-uv run fluxel branch --repo s3://my-bucket/datasets/demo feature
-uv run fluxel commit --repo s3://my-bucket/datasets/demo -m "snapshot current working tree"
-uv run fluxel rm --repo s3://my-bucket/datasets/demo obsolete
-uv run fluxel mv --repo s3://my-bucket/datasets/demo bootstrap final
-uv run fluxel commit --repo s3://my-bucket/datasets/demo --staged -m "drop obsolete paths and rename imported prefix"
+uv run dataref branch --repo s3://my-bucket/datasets/demo feature
+uv run dataref commit --repo s3://my-bucket/datasets/demo -m "snapshot current working tree"
+uv run dataref rm --repo s3://my-bucket/datasets/demo obsolete
+uv run dataref mv --repo s3://my-bucket/datasets/demo bootstrap final
+uv run dataref commit --repo s3://my-bucket/datasets/demo --staged -m "drop obsolete paths and rename imported prefix"
 
 # JSON output for programmatic use (all commands support --json)
-uv run fluxel status --repo /tmp/fluxel-demo --json
-uv run fluxel add --repo /tmp/fluxel-demo data/new.csv --json
-uv run fluxel diff --repo /tmp/fluxel-demo main feature --json
+uv run dataref status --repo /tmp/dataref-demo --json
+uv run dataref add --repo /tmp/dataref-demo data/new.csv --json
+uv run dataref diff --repo /tmp/dataref-demo main feature --json
 ```
 
 ## Analytical Index (Derived, Disposable)
 
 ```bash
-uv run fluxel index build --repo /tmp/fluxel-demo --parquet
+uv run dataref index build --repo /tmp/dataref-demo --parquet
 ```
 
-`fluxel index build` writes a DuckDB database (and optional Parquet export) for the current branch's manifest to `.fluxel/index/<commit_id>.duckdb`. Query it with the DuckDB CLI:
+`dataref index build` writes a DuckDB database (and optional Parquet export) for the current branch's manifest to `.dataref/index/<commit_id>.duckdb`. Query it with the DuckDB CLI:
 
 ```bash
 duckdb /path/to/<commit>.duckdb "SELECT COUNT(*) FROM files"
 ```
 
-If the index is deleted, Fluxel remains fully functional from manifests and commits.
+If the index is deleted, Dataref remains fully functional from manifests and commits.
 
 ## `fsspec` URI Example
 
 ```python
-from fluxel.core import FluxelFileSystem
+from dataref.core import DatarefFileSystem
 
-fs = FluxelFileSystem(dataset_roots={"my_data": "/tmp/fluxel-demo"})
-with fs.open("fluxel://my_data@main/a.txt", "rb") as handle:
+fs = DatarefFileSystem(dataset_roots={"my_data": "/tmp/dataref-demo"})
+with fs.open("dataref://my_data@main/a.txt", "rb") as handle:
 	 data = handle.read()
 
 # include branch staged (not-yet-committed) changes
-with fs.open("fluxel://my_data@feature+staged/a.txt", "rb") as handle:
+with fs.open("dataref://my_data@feature+staged/a.txt", "rb") as handle:
 	 staged_data = handle.read()
 ```
 
-In `meta` snapshots, Fluxel reads from `source_uri` when no canonical `blobs/` object exists.
+In `meta` snapshots, Dataref reads from `source_uri` when no canonical `blobs/` object exists.
 
 ## Identity Modes
 
-Fluxel supports two identity modes for manifest entries:
+Dataref supports two identity modes for manifest entries:
 
 - `blake3` (default)
 	- Reads file bytes.
-	- Stores canonical blob in `.fluxel/blobs/`.
+	- Stores canonical blob in `.dataref/blobs/`.
 	- Manifest entry includes `identity_mode=blake3`, `identity_value`, and `blob_hash`.
 
 - `meta`
@@ -189,8 +189,8 @@ Fluxel supports two identity modes for manifest entries:
 	- Computes identity as `blake3("<relative_path>\n<size>")`.
 	- Stores no canonical blob (`blob_hash=null`) and keeps `source_uri` for reads.
 
-Set the mode per staged addition with `fluxel add --identity meta`, or set the
-repository-wide default for `fluxel commit` with `fluxel config set identity meta`.
+Set the mode per staged addition with `dataref add --identity meta`, or set the
+repository-wide default for `dataref commit` with `dataref config set identity meta`.
 
 This is useful for large bootstrap imports where strong content verification can be deferred.
 
@@ -198,7 +198,7 @@ This is useful for large bootstrap imports where strong content verification can
 
 Metadata-only (`meta`) revisions are **unverifiable**: the entry's
 identity is derived from path and size, not from content bytes. Until you run
-`fluxel verify`, Fluxel cannot prove that the content at `source_uri` matches
+`dataref verify`, Dataref cannot prove that the content at `source_uri` matches
 what was originally imported.
 
 **Warnings.** The CLI emits a warning to stderr whenever you stage with
@@ -207,12 +207,12 @@ and after `verify` reports how many unverifiable entries remain.
 
 **Source-retention policy.** Because metadata-only entries have no canonical
 blob, you **must** retain the source objects at their original `source_uri`
-until the entry has been promoted via `fluxel verify`. If a source object is
+until the entry has been promoted via `dataref verify`. If a source object is
 deleted, overwritten, or moved before verification, the corresponding manifest
 entry becomes irrecoverable — no content can be read and no hash can be
 validated.
 
-**Promotion to verifiable.** Run `fluxel verify` to read every metadata-only
+**Promotion to verifiable.** Run `dataref verify` to read every metadata-only
 entry's source blob, compute a Blake3 content hash, store the canonical blob,
 and rewrite the manifest entry in `blake3` mode. After promotion the source
 retention requirement is lifted for those entries.
@@ -226,12 +226,12 @@ retention requirement is lifted for those entries.
 
 ## Verify Command
 
-`fluxel verify` promotes metadata-only (`meta`) manifest entries of the current branch into canonical `blake3` blob-backed entries:
+`dataref verify` promotes metadata-only (`meta`) manifest entries of the current branch into canonical `blake3` blob-backed entries:
 
 ```bash
-uv run fluxel verify --repo /tmp/fluxel-demo
-uv run fluxel verify --repo /tmp/fluxel-demo --path images --path logs/2026
-uv run fluxel verify --repo /tmp/fluxel-demo --dry-run
+uv run dataref verify --repo /tmp/dataref-demo
+uv run dataref verify --repo /tmp/dataref-demo --path images --path logs/2026
+uv run dataref verify --repo /tmp/dataref-demo --dry-run
 ```
 
 - Verifies all entries by default (or selected path prefixes with `--path`).
@@ -241,16 +241,16 @@ uv run fluxel verify --repo /tmp/fluxel-demo --dry-run
 
 ## Incremental Ingress
 
-Fluxel's efficient content-ingress paths are:
+Dataref's efficient content-ingress paths are:
 
 ```bash
-uv run fluxel add --repo /tmp/fluxel-demo local/new.csv
-uv run fluxel add --repo /tmp/fluxel-demo --as imports/new.csv /tmp/random/new.csv
-uv run fluxel add --repo /tmp/fluxel-demo --as imports/new-batch /tmp/random/new-batch
-uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
-uv run fluxel add --repo /tmp/fluxel-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
-uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "add one file"
-uv run fluxel verify --repo /tmp/fluxel-demo --path images --path root.txt
+uv run dataref add --repo /tmp/dataref-demo local/new.csv
+uv run dataref add --repo /tmp/dataref-demo --as imports/new.csv /tmp/random/new.csv
+uv run dataref add --repo /tmp/dataref-demo --as imports/new-batch /tmp/random/new-batch
+uv run dataref add --repo /tmp/dataref-demo --identity meta --as imports/bootstrap.csv s3://my-bucket/bootstrap.csv
+uv run dataref add --repo /tmp/dataref-demo --identity meta --as imports/bootstrap s3://my-bucket/bootstrap
+uv run dataref commit --repo /tmp/dataref-demo --staged -m "add one file"
+uv run dataref verify --repo /tmp/dataref-demo --path images --path root.txt
 ```
 
 - `add` + `commit --staged` preserves the current branch manifest and reads bytes only for staged additions.
@@ -260,7 +260,7 @@ uv run fluxel verify --repo /tmp/fluxel-demo --path images --path root.txt
 
 ## S3 Integration Tests
 
-Fluxel includes `integration`-marked tests for real S3-compatible behavior. The preferred target is Ministack.
+Dataref includes `integration`-marked tests for real S3-compatible behavior. The preferred target is Ministack.
 
 For the standard local workflow, run a single command from the repository root:
 
@@ -299,13 +299,13 @@ curl http://127.0.0.1:4566/_ministack/health
 Then set these environment variables before running the suite:
 
 ```bash
-export FLUXEL_MINISTACK_ENDPOINT=http://127.0.0.1:4566
-export FLUXEL_MINISTACK_ACCESS_KEY=test
-export FLUXEL_MINISTACK_SECRET_KEY=test
-export FLUXEL_MINISTACK_REGION=us-east-1
+export DATAREF_MINISTACK_ENDPOINT=http://127.0.0.1:4566
+export DATAREF_MINISTACK_ACCESS_KEY=test
+export DATAREF_MINISTACK_SECRET_KEY=test
+export DATAREF_MINISTACK_REGION=us-east-1
 ```
 
-Fluxel's integration fixture already uses path-style boto3 S3 addressing, so no extra S3 client flags are needed.
+Dataref's integration fixture already uses path-style boto3 S3 addressing, so no extra S3 client flags are needed.
 
 Then run:
 
@@ -313,7 +313,7 @@ Then run:
 uv run pytest tests/test_s3_integration.py -m integration
 ```
 
-If `FLUXEL_MINISTACK_ENDPOINT` is unset or the endpoint is unreachable, the integration tests skip automatically.
+If `DATAREF_MINISTACK_ENDPOINT` is unset or the endpoint is unreachable, the integration tests skip automatically.
 
 To wipe the local emulator state between runs without restarting the container:
 
@@ -323,10 +323,10 @@ curl -X POST http://127.0.0.1:4566/_ministack/reset
 
 ## Merge Command
 
-`fluxel merge` updates a target branch by fast-forward only:
+`dataref merge` updates a target branch by fast-forward only:
 
 ```bash
-uv run fluxel merge --repo /tmp/fluxel-demo feature main
+uv run dataref merge --repo /tmp/dataref-demo feature main
 ```
 
 - The source ref can be a branch or commit.
@@ -336,22 +336,22 @@ uv run fluxel merge --repo /tmp/fluxel-demo feature main
 
 ## Metadata-Only Remove And Move
 
-`fluxel rm` and `fluxel mv` stage metadata-only mutations; `fluxel commit --staged` writes a new manifest and commit:
+`dataref rm` and `dataref mv` stage metadata-only mutations; `dataref commit --staged` writes a new manifest and commit:
 
 ```bash
-uv run fluxel rm --repo /tmp/fluxel-demo logs/2025
-uv run fluxel mv --repo /tmp/fluxel-demo incoming/images curated/images
-uv run fluxel commit --repo /tmp/fluxel-demo --staged -m "remove old logs and rename prefix"
+uv run dataref rm --repo /tmp/dataref-demo logs/2025
+uv run dataref mv --repo /tmp/dataref-demo incoming/images curated/images
+uv run dataref commit --repo /tmp/dataref-demo --staged -m "remove old logs and rename prefix"
 ```
 
 - These operations read manifest metadata only; they do not download unchanged blob payloads.
 - `rm` accepts file paths or path prefixes and removes all matching logical entries.
 - `mv` accepts a file path or prefix and rewrites matching logical paths in the manifest.
-- `fluxel status` shows staged removals and renames before `fluxel commit --staged`.
+- `dataref status` shows staged removals and renames before `dataref commit --staged`.
 
 ## Repository Layout
 
-Fluxel creates `.fluxel/` under each dataset root:
+Dataref creates `.dataref/` under each dataset root:
 
 - `blobs/` - canonical content-addressed object store
 - `manifests/` - JSONL path->hash snapshots
@@ -365,7 +365,7 @@ Current tests cover required invariants:
 
 - Metadata-only diff reads no blob payloads.
 - Manifest generation for 100k entries stays under RAM cap.
-- `fluxel://my_data@main/test.csv` resolves and returns expected bytes.
+- `dataref://my_data@main/test.csv` resolves and returns expected bytes.
 
 Run test suite:
 

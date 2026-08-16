@@ -1,6 +1,6 @@
 """The ``ObjectStore`` protocol: object IO, CAS refs, and tree-walk queries.
 
-This is the single store protocol of Fluxel v2 (§1/§12 of
+This is the single store protocol of Dataref v2 (§1/§12 of
 docs/architecture.md): immutable object IO (blobs, trees, commits, footers),
 pure-CAS branch refs (§6), and tree-walk lookups (§3).  Index sidecars and
 branch locks are gone, so there is nothing left to compose — one protocol,

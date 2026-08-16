@@ -1,5 +1,5 @@
 [project]
-name = "fluxel"
+name = "dataref"
 version = "0.1.0"
 description = "A client-first, object-storage-first data versioning engine"
 readme = "README.md"
@@ -42,7 +42,7 @@ Changelog = "https://github.com/londogard/fluxel/blob/main/CHANGELOG.md"
 Funding = "https://github.com/sponsors/londogard"
 
 [project.scripts]
-fluxel = "fluxel.cli:main"
+dataref = "dataref.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -52,7 +52,7 @@ build-backend = "hatchling.build"
 dev = ["pytest>=9.0.2", "pyrefly>=0.3.0"]
 
 [tool.pyrefly]
-project-includes = ["src/fluxel"]
+project-includes = ["src/dataref"]
 project-excludes = ["tests/"]
 
 [tool.pytest.ini_options]

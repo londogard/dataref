@@ -5,16 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from fluxel import run_cli
-from fluxel.core.config import (
+from dataref import run_cli
+from dataref.core.config import (
     CURRENT_FORMAT_VERSION,
     BaseConfig,
-    FluxelConfig,
+    DatarefConfig,
     LocalConfig,
     S3Config,
     init_config,
 )
-from fluxel.core.repository import FluxelRepository
+from dataref.core.repository import DatarefRepository
 
 
 def test_config_init_via_cli_creates_config_file(tmp_path: Path, capsys) -> None:
@@ -131,7 +131,7 @@ def test_config_init_idempotent(tmp_path: Path, capsys) -> None:
     assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
     capsys.readouterr()
 
-    config_path = tmp_path / ".fluxel" / "config.json"
+    config_path = tmp_path / ".dataref" / "config.json"
     assert config_path.exists()
 
     init_config(tmp_path, backend="local")
@@ -173,26 +173,26 @@ def test_config_default_format_version(tmp_path: Path) -> None:
 def test_config_serialize_includes_format_version(tmp_path: Path) -> None:
     config = LocalConfig(dataset_root=str(tmp_path))
     config.save(tmp_path)
-    raw = json.loads((tmp_path / ".fluxel" / "config.json").read_text("utf-8"))
+    raw = json.loads((tmp_path / ".dataref" / "config.json").read_text("utf-8"))
     assert raw["format_version"] == 1
 
 
 def test_repo_rejects_unsupported_format_version(tmp_path: Path) -> None:
-    FluxelRepository(tmp_path)
-    config_path = tmp_path / ".fluxel" / "config.json"
+    DatarefRepository(tmp_path)
+    config_path = tmp_path / ".dataref" / "config.json"
     config = json.loads(config_path.read_text("utf-8"))
     config["format_version"] = CURRENT_FORMAT_VERSION + 1
     config_path.write_text(json.dumps(config, indent=2) + "\n", "utf-8")
     try:
-        FluxelRepository(tmp_path)
+        DatarefRepository(tmp_path)
         assert False, "Should have raised"
     except ValueError as e:
         assert "newer" in str(e)
 
 
 def test_config_missing_format_version_defaults_to_current(tmp_path: Path) -> None:
-    (tmp_path / ".fluxel").mkdir()
-    (tmp_path / ".fluxel" / "config.json").write_text(
+    (tmp_path / ".dataref").mkdir()
+    (tmp_path / ".dataref" / "config.json").write_text(
         json.dumps(
             {
                 "backend": "local",
@@ -212,7 +212,7 @@ def test_validate_config_rejects_future_format() -> None:
         assert False, "Should have raised"
     except ValueError as e:
         msg = str(e)
-        assert "newer" in msg and "upgrade fluxel" in msg
+        assert "newer" in msg and "upgrade dataref" in msg
 
 
 def test_validate_config_rejects_unsupported_old_format() -> None:
@@ -221,11 +221,11 @@ def test_validate_config_rejects_unsupported_old_format() -> None:
         assert False, "Should have raised"
     except ValueError as e:
         msg = str(e)
-        assert "no longer supported" in msg and "fluxel migrate" in msg
+        assert "no longer supported" in msg and "dataref migrate" in msg
 
 
 def test_config_save_and_load_roundtrip(tmp_path: Path) -> None:
-    original: FluxelConfig = S3Config(
+    original: DatarefConfig = S3Config(
         dataset_root=str(tmp_path),
         default_branch="develop",
         bucket="b",

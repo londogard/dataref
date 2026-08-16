@@ -1,4 +1,4 @@
-# Fluxel Architecture v2 — Design Sketch
+# Dataref Architecture v2 — Design Sketch
 
 **Status:** proposal (rev. 3 — rev. 2 folded in review: lookup-path design with a client-side tree cache,
 parquet-footer scoping, conflict-retry in P0, restore/checkout materialization, `generation`
@@ -18,22 +18,22 @@ entries with `footers/<hash>` stats objects; worktree-optional CLI (`list`/`cat`
 **P2 shipped:** plan-then-batch transfers (transfer plan + s5cmd batch or per-object boto3
 execution, progress callbacks, footer sync); adapter error translation (`ObjectMissingError`/
 `PreconditionFailedError`/`StorageUnavailableError` at the S3 boundary, CLI no longer handles
-botocore exceptions); `fluxel gc` audit with opt-in `--prune`.
+botocore exceptions); `dataref gc` audit with opt-in `--prune`.
 
 **P3 shipped:** metadata-only 3-way merge for diverged branches (LCA + streaming
 base/ours/theirs merge, merge commits with two parents, `MergeConflictError` on conflicting
-paths); per-branch reflog (`fluxel reflog`); dataset registry (`fluxel catalog`).
+paths); per-branch reflog (`dataref reflog`); dataset registry (`dataref catalog`).
 **Post-rollout shipped (rev. 3):** the `repository_store/` + `storage/` → `objects/` store
 unification (§12 — one `ObjectStore` protocol; `LocalObjectStore` / `S3ObjectStore`
 adapters) and the query pruning engine over footer stats (§4 — `core/query/pruning.py` +
-`fluxel query prune`, row-group selection from stats objects only).  Open questions
+`dataref query prune`, row-group selection from stats objects only).  Open questions
 remain in §15 (bucket layout, `export` first-class, tree-prefix pin policy, remote
 row-group stats on `mp` entries).
 **Assumption:** **no backwards compatibility** with v1 on-disk formats, commit schema,
 manifest format, ref format, staging format, lock format, or module layout. We can break
 the on-disk contract freely.
 
-This document sketches the full set of architectural changes to make Fluxel an
+This document sketches the full set of architectural changes to make Dataref an
 object-first **data** versioning engine rather than a git-clone-with-S3. Each section ties
 back to the current code so it is actionable.
 
@@ -57,11 +57,11 @@ constraint we can:
 
 ```mermaid
 flowchart TB
-    subgraph cli["fluxel.cli (worktree-optional)"]
+    subgraph cli["dataref.cli (worktree-optional)"]
         Init["init / checkout / restore / status (materialized)"]
         Virt["ls / cat / query / diff / log / branch / merge / push / pull (virtual)"]
     end
-    subgraph core["fluxel.core"]
+    subgraph core["dataref.core"]
         VFS["vfs — virtual dataset view (primary product)"]
         QRY["query — duckdb / arrow / parquet interop"]
         SRV["services — RefManager, TreeWriter, StagingArea, EntryFactory"]
@@ -86,7 +86,7 @@ flowchart TB
 Module map (no backcompat ⇒ free renames):
 
 ```
-src/fluxel/
+src/dataref/
   core/
     domain/          # types + errors (keep)
     objects/         # ObjectStore: blob + tree + footer + commit + ref IO, CAS; local/s3 adapters
@@ -231,14 +231,14 @@ plumbing. One lookup core + one optional materialization instead of three paths.
 
 ## 4. Virtual dataset view + query = the primary product
 
-- A branch/commit **is** a virtual dataset: `fluxel://<dataset>@<ref>/<path>` with a staged
+- A branch/commit **is** a virtual dataset: `dataref://<dataset>@<ref>/<path>` with a staged
   overlay (`+staged`). Read-only fsspec already exists; make it the center of the product
   instead of the working tree.
-- **`fluxel.core.query`** absorbs the existing `core/index.py` (`build_analytical_index`,
+- **`dataref.core.query`** absorbs the existing `core/index.py` (`build_analytical_index`,
   `query_analytical_index`): manifest/tree → DuckDB table (`path, hash, size, mtime_ns, …`)
   with optional parquet export. The catalog becomes derivable from tree + footer objects
   without re-reading footers.
-  - DuckDB over `fluxel://` (via fsspec/duckdb path, or a branch-scoped table function)
+  - DuckDB over `dataref://` (via fsspec/duckdb path, or a branch-scoped table function)
     with predicate pushdown.
   - **Parquet footer metadata**: at ingest, read only the footer (`head_object` + last
     bytes), write a compact stats object — **schema hash + per-row-group column
@@ -249,7 +249,7 @@ plumbing. One lookup core + one optional materialization instead of three paths.
     entries carry a `has_footer` marker so `verify` can backfill it later.
     **Shipped (rev. 3):** the pruning engine lives in `core/query/pruning.py`
     (`parse_where_clause`, `prune_row_groups`, `plan_pruned_scan`) and is exposed as
-    `fluxel query prune <ref> <path> --where "col >= x"` — it reads only the
+    `dataref query prune <ref> <path> --where "col >= x"` — it reads only the
     `footers/<hash>` stats objects and reports the row groups that may match, with
     conservative keep-on-unknown handling. Predicates are AND-composed `= != < <= > >=
     IS NULL IS NOT NULL`; OR is rejected.
@@ -315,9 +315,9 @@ v2:
 
 - All `botocore`/`ClientError` handling moves into the S3 adapter, which raises domain errors
   (`ObjectMissingError`, `PreconditionFailedError`, `StorageUnavailableError` — subclasses of
-  `FluxelError`).
+  `DatarefError`).
 - `cli.py` drops `BotoCoreError`/`ClientError` from its handled-errors list; one
-  `FluxelError`-based list remains.
+  `DatarefError`-based list remains.
 
 ---
 
@@ -346,7 +346,7 @@ v2:
 ## 11. Retention / GC stance
 
 - No GC by default; immutable objects accumulate by design (document as a feature).
-- Add `fluxel gc --dry-run` (audit-only by default): compute reachable objects from all
+- Add `dataref gc --dry-run` (audit-only by default): compute reachable objects from all
   refs (a cheap tree walk now — blobs, trees, footers, commits) and report orphans.
   `--prune` stays optional and opt-in.
 
@@ -404,7 +404,7 @@ Covered in §1. Summary of renames:
 
 - Bucket layout: keep `blobs/`, `commits/`, `trees/`, `refs/`, or unify under `objects/`
   with type prefixes (`objects/b/…`, `objects/t/…`)?
-- Keep full-manifest export first-class (`fluxel export <ref>`), or is tree walk + vfs
+- Keep full-manifest export first-class (`dataref export <ref>`), or is tree walk + vfs
   enough?
 - Parquet footer ingestion: always capture, or opt-in flag? (cost: `head_object` + footer
   read per file at ingest; entries keep a `has_footer` marker so `verify` can backfill.)

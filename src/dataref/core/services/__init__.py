@@ -1,4 +1,4 @@
-"""Collaborator services for FluxelRepository.
+"""Collaborator services for DatarefRepository.
 
 These objects own cohesive slices of repository behavior:
 

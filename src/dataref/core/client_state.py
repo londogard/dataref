@@ -16,16 +16,16 @@ HEAD_FILE = "HEAD"
 class LocalClientState:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
-        self.fluxel_dir = self.root / ".fluxel"
-        self.refs_dir = self.fluxel_dir / "refs"
+        self.dataref_dir = self.root / ".dataref"
+        self.refs_dir = self.dataref_dir / "refs"
         self.branch_state_dir = self.refs_dir / "heads"
-        self.staging_dir = self.fluxel_dir / "staging"
-        self.cache_dir = self.fluxel_dir / "cache"
-        self.reflog_dir = self.fluxel_dir / "reflog"
+        self.staging_dir = self.dataref_dir / "staging"
+        self.cache_dir = self.dataref_dir / "cache"
+        self.reflog_dir = self.dataref_dir / "reflog"
         self.head_path = self.refs_dir / HEAD_FILE
 
         for path in (
-            self.fluxel_dir,
+            self.dataref_dir,
             self.refs_dir,
             self.branch_state_dir,
             self.staging_dir,

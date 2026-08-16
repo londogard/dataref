@@ -11,7 +11,7 @@ from simple_parsing import ArgumentParser
 from simple_parsing.helpers import field, flag, subparsers
 
 from .core import (
-    FluxelError,
+    DatarefError,
     NotARepositoryError,
     RefConflictError,
     StageStatus,
@@ -33,7 +33,7 @@ from .core import (
 )
 from .core.config import (
     BaseConfig,
-    FluxelConfig,
+    DatarefConfig,
     LocalConfig,
     S3Config,
     init_config,
@@ -41,7 +41,7 @@ from .core.config import (
 
 IdentityMode = Literal["blake3", "meta"]
 HANDLED_CLI_ERRORS = (
-    FluxelError,
+    DatarefError,
     FileNotFoundError,
     PermissionError,
     RefConflictError,
@@ -587,7 +587,7 @@ class QueryArgs:
 
 
 @dataclass
-class FluxelCLI:
+class DatarefCLI:
     command: (
         CommitArgs
         | AddArgs
@@ -645,16 +645,16 @@ class FluxelCLI:
 
 def build_parser() -> _CleanParser:
     parser = _CleanParser(
-        prog="fluxel",
+        prog="dataref",
         description="Serverless object-storage-first data versioning engine.",
     )
     parser.add_argument(
         "--version",
         action="version",
-        version=f"fluxel {metadata.version('fluxel')}",
+        version=f"dataref {metadata.version('dataref')}",
         help="Show version and exit",
     )
-    parser.add_arguments(FluxelCLI, dest="cli")
+    parser.add_arguments(DatarefCLI, dest="cli")
     return parser
 
 
@@ -666,7 +666,7 @@ class _CleanParser(ArgumentParser):
 
         text = super().format_help()
         text = re.sub(
-            r"FluxelCLI \['cli'\]:\n  FluxelCLI\(command: '[^)]+'\)\n?",
+            r"DatarefCLI \['cli'\]:\n  DatarefCLI\(command: '[^)]+'\)\n?",
             "",
             text,
         )
@@ -727,7 +727,7 @@ def _flatten_option_values(values: list[Any]) -> list[str]:
     return flattened
 
 
-def _config_set_value(config: FluxelConfig, key: str, value: str) -> FluxelConfig:
+def _config_set_value(config: DatarefConfig, key: str, value: str) -> DatarefConfig:
     if key == "backend":
         if value not in ("local", "s3"):
             raise ValueError(f"Backend must be 'local' or 's3', got: {value}")
@@ -840,7 +840,7 @@ def _command_name(command: object) -> str:
         if isinstance(command.command, ConfigListArgs):
             return "config list"
         return "config"
-    return "fluxel"
+    return "dataref"
 
 
 def run_cli(argv: list[str] | None = None) -> int:
@@ -868,7 +868,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             if config is not None and config.identity == "meta":
                 print(
                     "⚠  Metadata-only identity: this revision is unverifiable "
-                    "until `fluxel verify` is run. "
+                    "until `dataref verify` is run. "
                     "You must retain source objects for future verification.",
                     file=sys.stderr,
                 )
@@ -888,7 +888,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             if command.identity == "meta":
                 print(
                     "⚠  Metadata-only identity: revisions are unverifiable "
-                    "until `fluxel verify` is run. "
+                    "until `dataref verify` is run. "
                     "You must retain source objects for future verification.",
                     file=sys.stderr,
                 )
@@ -1260,7 +1260,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 config = BaseConfig.load(config_command.root)
                 if config is None:
                     print(
-                        "No config found. Run 'fluxel config init' first.",
+                        "No config found. Run 'dataref config init' first.",
                         file=sys.stderr,
                     )
                     return 1
@@ -1274,7 +1274,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 config = BaseConfig.load(config_command.root)
                 if config is None:
                     print(
-                        "No config found. Run 'fluxel config init' first.",
+                        "No config found. Run 'dataref config init' first.",
                         file=sys.stderr,
                     )
                     return 1

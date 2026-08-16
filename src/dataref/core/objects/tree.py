@@ -1,4 +1,4 @@
-"""Tree objects: the Merkle-tree node format for Fluxel v2.
+"""Tree objects: the Merkle-tree node format for Dataref v2.
 
 A tree object is a sorted JSONL file of entries.  Each entry addresses either a
 child tree (real directory ``t`` or name-range shard ``s``) or a leaf file

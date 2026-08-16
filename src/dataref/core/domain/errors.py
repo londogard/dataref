@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 
-class FluxelError(ValueError):
-    """Base exception for all Fluxel domain errors."""
+class DatarefError(ValueError):
+    """Base exception for all Dataref domain errors."""
 
 
-class RefConflictError(FluxelError):
+class RefConflictError(DatarefError):
     """Raised when a reference update conflicts with another client or concurrent operation."""
 
     def __init__(
@@ -27,11 +27,11 @@ class RefConflictError(FluxelError):
         self.current_commit_id = current_commit_id
 
 
-class OptimisticLockError(FluxelError):
+class OptimisticLockError(DatarefError):
     """Raised when an optimistic lock check fails during CAS operations."""
 
 
-class NonFastForwardError(FluxelError):
+class NonFastForwardError(DatarefError):
     """Raised when a merge, push, or pull operation is not a fast-forward update."""
 
     def __init__(self, *, branch: str, current_commit: str, target_commit: str) -> None:
@@ -44,7 +44,7 @@ class NonFastForwardError(FluxelError):
         self.target_commit = target_commit
 
 
-class ObjectMissingError(FluxelError):
+class ObjectMissingError(DatarefError):
     """Raised by storage adapters when a requested object does not exist."""
 
 
@@ -55,11 +55,11 @@ class PreconditionFailedError(OptimisticLockError):
     """
 
 
-class StorageUnavailableError(FluxelError):
+class StorageUnavailableError(DatarefError):
     """Raised by storage adapters for unrecoverable S3 transport failures."""
 
 
-class MergeConflictError(FluxelError):
+class MergeConflictError(DatarefError):
     """Raised when a 3-way merge hits paths modified on both sides."""
 
     def __init__(self, *, paths: list[str]) -> None:
@@ -69,11 +69,11 @@ class MergeConflictError(FluxelError):
         super().__init__(f"Merge conflict at: {joined}{suffix}")
 
 
-class NotARepositoryError(FluxelError):
-    """Raised when an operation is executed outside a Fluxel repository."""
+class NotARepositoryError(DatarefError):
+    """Raised when an operation is executed outside a Dataref repository."""
 
     def __init__(self, root: object = ".") -> None:
         self.root = str(root)
         super().__init__(
-            f"not a fluxel repository (or any of the parent directories): .fluxel"
+            f"not a dataref repository (or any of the parent directories): .dataref"
         )
