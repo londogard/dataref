@@ -35,10 +35,10 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/londogard/DATAREF_URL_PLACEHOLDER"
-Documentation = "https://github.com/londogard/DATAREF_URL_PLACEHOLDER#readme"
-Issues = "https://github.com/londogard/DATAREF_URL_PLACEHOLDER/issues"
-Changelog = "https://github.com/londogard/DATAREF_URL_PLACEHOLDER/blob/main/CHANGELOG.md"
+Repository = "https://github.com/londogard/dataref"
+Documentation = "https://github.com/londogard/dataref#readme"
+Issues = "https://github.com/londogard/dataref/issues"
+Changelog = "https://github.com/londogard/dataref/blob/main/CHANGELOG.md"
 Funding = "https://github.com/sponsors/londogard"
 
 [project.scripts]
