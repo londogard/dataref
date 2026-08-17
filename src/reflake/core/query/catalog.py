@@ -32,7 +32,7 @@ def build_analytical_index(
     index_root = (
         Path(output_dir).resolve()
         if output_dir
-        else (repo.client_state.dataref_dir / "index")
+        else (repo.client_state.reflake_dir / "index")
     )
     index_root.mkdir(parents=True, exist_ok=True)
     db_path = index_root / f"{commit_id}.duckdb"

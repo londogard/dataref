@@ -1,14 +1,14 @@
-# Dataref Operator Runbook
+# Reflake Operator Runbook
 
-This document covers operational procedures for running Dataref against
+This document covers operational procedures for running Reflake against
 S3-compatible object storage.  It assumes you are already familiar with the
-[Dataref README](../README.md).
+[Reflake README](../README.md).
 
 ---
 
 ## S3 IAM
 
-Dataref requires **read and write access** to the configured S3 bucket and
+Reflake requires **read and write access** to the configured S3 bucket and
 prefix.  The following IAM policy is the **minimum** required for normal
 operations:
 
@@ -35,11 +35,11 @@ operations:
 
 **Additional permissions for lock recovery** (optional, for operators):
 - `s3:ListBucket` on the `locks/` prefix is already covered above.
-- `s3:DeleteObject` on `locks/refs/heads/*` is required for `dataref lock cleanup`.
+- `s3:DeleteObject` on `locks/refs/heads/*` is required for `reflake lock cleanup`.
 
 **Credentials** are supplied via the standard AWS credential chain:
 environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`),
-`~/.aws/credentials`, or IAM instance profiles.  Dataref does not store
+`~/.aws/credentials`, or IAM instance profiles.  Reflake does not store
 credentials itself.
 
 ---
@@ -54,8 +54,8 @@ TLS 1.2+.
 
 | Tier | Mechanism | Recommendation |
 |------|-----------|----------------|
-| S3 server-side | SSE-S3 (AES-256) | Enable as bucket default.  Zero Dataref configuration needed. |
-| S3 server-side | SSE-KMS | Supported via AWS KMS.  Set the default bucket encryption to KMS and ensure the Dataref IAM role has `kms:Decrypt` and `kms:GenerateDataKey` on the KMS key. |
+| S3 server-side | SSE-S3 (AES-256) | Enable as bucket default.  Zero Reflake configuration needed. |
+| S3 server-side | SSE-KMS | Supported via AWS KMS.  Set the default bucket encryption to KMS and ensure the Reflake IAM role has `kms:Decrypt` and `kms:GenerateDataKey` on the KMS key. |
 | Client-side | Not yet supported | File an issue if this is a blocker. |
 
 **Bucket policy snippet (enforce SSE-S3):**
@@ -78,7 +78,7 @@ TLS 1.2+.
 
 ## Bucket Versioning
 
-**Enable bucket versioning** on your Dataref S3 bucket.  Dataref objects
+**Enable bucket versioning** on your Reflake S3 bucket.  Reflake objects
 (blobs, manifests, commits, refs) are **immutable by key** — once written,
 they are never updated in place.  Versioning provides:
 
@@ -95,14 +95,14 @@ aws s3api put-bucket-versioning \
     --versioning-configuration Status=Enabled
 ```
 
-**Dataref does not require versioning to function**, but it is strongly
+**Reflake does not require versioning to function**, but it is strongly
 recommended for production deployments.
 
 ---
 
 ## Lifecycle / Retention
 
-S3 lifecycle rules let you manage storage costs without breaking Dataref's
+S3 lifecycle rules let you manage storage costs without breaking Reflake's
 integrity model.
 
 ### Recommended rules
@@ -142,14 +142,14 @@ integrity model.
    Infrequent Access or Glacier Instant Retrieval is safe.
 
 **Do not** set lifecycle rules that delete the *current version* of any
-object — Dataref never overwrites objects in place, so the current version
+object — Reflake never overwrites objects in place, so the current version
 is always the canonical one.
 
 ---
 
 ## Backups
 
-Dataref's S3 objects are the canonical store.  Your backup strategy should
+Reflake's S3 objects are the canonical store.  Your backup strategy should
 protect against **bucket-level** loss (region failure, account compromise,
 accidental bucket deletion).
 
@@ -163,7 +163,7 @@ accidental bucket deletion).
 
 ### What to back up
 
-Everything under the Dataref prefix:
+Everything under the Reflake prefix:
 
 ```
 <PREFIX>/
@@ -182,7 +182,7 @@ but including them is harmless.
 ### Restore procedure
 
 1. Restore the S3 prefix from your backup to the target bucket.
-2. Run `dataref lock cleanup --force` to clear any stale locks that may
+2. Run `reflake lock cleanup --force` to clear any stale locks that may
    have been restored from backup.
 3. Clients can resume normal operations — they will pick up the restored
    branch refs on their next command.
@@ -191,7 +191,7 @@ but including them is harmless.
 
 ## Lock Recovery
 
-Dataref uses **S3-based advisory locks** to serialise concurrent branch
+Reflake uses **S3-based advisory locks** to serialise concurrent branch
 ref updates in shared S3 repositories.  Every `compare_and_set_branch_ref`
 call acquires a short-lived lock before reading and writing the ref.
 
@@ -211,10 +211,10 @@ future, default 30 s).  If a client crashes mid-operation, the lock becomes
 
 ```bash
 # List all active locks
-dataref lock list --repo s3://my-bucket/my-prefix
+reflake lock list --repo s3://my-bucket/my-prefix
 
 # List as JSON
-dataref lock list --repo s3://my-bucket/my-prefix --json
+reflake lock list --repo s3://my-bucket/my-prefix --json
 ```
 
 Example output:
@@ -230,13 +230,13 @@ main                           active     2026-07-20 14:32:45 UTC
 
 ```bash
 # Release all stale locks
-dataref lock cleanup --repo s3://my-bucket/my-prefix
+reflake lock cleanup --repo s3://my-bucket/my-prefix
 
 # Release a specific branch lock (even if not stale)
-dataref lock cleanup --repo s3://my-bucket/my-prefix --force feature
+reflake lock cleanup --repo s3://my-bucket/my-prefix --force feature
 
 # Dry-run with JSON
-dataref lock cleanup --repo s3://my-bucket/my-prefix --json
+reflake lock cleanup --repo s3://my-bucket/my-prefix --json
 ```
 
 ### When to use `--force`
@@ -259,10 +259,10 @@ The conflict is safe (no data loss), but the client must retry.
 racing.
 
 **Resolution:**
-1. Run `dataref lock list --repo <URI>` to inspect locks.
-2. If locks are stale: `dataref lock cleanup --repo <URI>`
+1. Run `reflake lock list --repo <URI>` to inspect locks.
+2. If locks are stale: `reflake lock cleanup --repo <URI>`
 3. If locks are active: wait for the other client to finish, or
-   `dataref lock cleanup --force <branch>` if you are certain the other
+   `reflake lock cleanup --force <branch>` if you are certain the other
    client is gone.
 
 ---
@@ -273,7 +273,7 @@ racing.
 the push.  This is a **non-fast-forward** scenario.
 
 **Resolution:**
-1. `dataref pull --repo <URI>` to fetch the latest branch state.
+1. `reflake pull --repo <URI>` to fetch the latest branch state.
 2. Resolve any conflicts manually.
 3. Commit and push again.
 
@@ -286,9 +286,9 @@ deleted or moved before verification.
 
 **Resolution:**
 1. Restore the source object at its original `source_uri`.
-2. Re-run `dataref verify`.
+2. Re-run `reflake verify`.
 3. If the source object cannot be restored, the entry is irrecoverable.
-   Remove it with `dataref rm <path>` and commit with `dataref commit --staged`.
+   Remove it with `reflake rm <path>` and commit with `reflake commit --staged`.
 
 ---
 
@@ -310,8 +310,8 @@ overly aggressive lifecycle rule).
 
 **Resolution:**
 1. Restore from backup (see [Backups](#backups)).
-2. Run `dataref lock cleanup --force --repo <URI>` to clear stale locks.
-3. Verify integrity: `dataref verify --repo <URI>`.
+2. Run `reflake lock cleanup --force --repo <URI>` to clear stale locks.
+3. Verify integrity: `reflake verify --repo <URI>`.
 
 ---
 
@@ -319,9 +319,9 @@ overly aggressive lifecycle rule).
 
 | Task | Command |
 |------|---------|
-| Verify integrity | `dataref verify --repo <URI>` |
-| Audit orphaned objects | `dataref gc --repo <URI>` (`--prune` deletes) |
-| List branches with heads | `dataref catalog --repo <URI>` |
+| Verify integrity | `reflake verify --repo <URI>` |
+| Audit orphaned objects | `reflake gc --repo <URI>` (`--prune` deletes) |
+| List branches with heads | `reflake catalog --repo <URI>` |
 
 Concurrency safety is CAS-only (docs/architecture.md §6): ref updates use
 version-token compare-and-set, so there are no branch locks to list, time out,

@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from dataref.core import (
+from reflake.core import (
     FileEntry,
-    DatarefFileSystem,
-    DatarefRepository,
+    ReflakeFileSystem,
+    ReflakeRepository,
     LocalClientState,
     LocalObjectStore,
     ManifestEntry,
@@ -26,7 +26,7 @@ from dataref.core import (
     query_analytical_index,
     walk_files,
 )
-from dataref.core.objects.tree import parse_tree_object
+from reflake.core.objects.tree import parse_tree_object
 
 
 class ConflictOnceLocalObjectStore(LocalObjectStore):
@@ -57,7 +57,7 @@ class ConflictOnceLocalObjectStore(LocalObjectStore):
 
 def test_metadata_only_diff_does_not_read_blobs(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "a.txt").write_text("alpha")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     commit_a = repo.commit("initial")
 
     (tmp_path / "a.txt").write_text("beta")
@@ -69,7 +69,7 @@ def test_metadata_only_diff_does_not_read_blobs(tmp_path: Path, monkeypatch) -> 
 
     def tracking_read_bytes(path: Path) -> bytes:
         path_obj = Path(path)
-        if ".dataref" in path_obj.parts and "blobs" in path_obj.parts:
+        if ".reflake" in path_obj.parts and "blobs" in path_obj.parts:
             touched_blob_reads.append(path_obj)
         return original_read_bytes(path_obj)
 
@@ -86,7 +86,7 @@ def test_metadata_only_diff_does_not_read_blobs(tmp_path: Path, monkeypatch) -> 
 def test_metadata_only_remove_does_not_read_blobs(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "a.txt").write_text("alpha")
     (tmp_path / "b.txt").write_text("beta")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     repo.commit("initial")
 
     touched_blob_reads: list[Path] = []
@@ -94,7 +94,7 @@ def test_metadata_only_remove_does_not_read_blobs(tmp_path: Path, monkeypatch) -
 
     def tracking_read_bytes(path: Path) -> bytes:
         path_obj = Path(path)
-        if ".dataref" in path_obj.parts and "blobs" in path_obj.parts:
+        if ".reflake" in path_obj.parts and "blobs" in path_obj.parts:
             touched_blob_reads.append(path_obj)
         return original_read_bytes(path_obj)
 
@@ -113,7 +113,7 @@ def test_metadata_only_move_updates_meta_identity_without_blob_read(
     nested = tmp_path / "dir"
     nested.mkdir()
     (nested / "file.txt").write_text("payload")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     repo.commit("meta only")
     before_entry = repo.resolve_entries("main")["dir/file.txt"]
 
@@ -122,7 +122,7 @@ def test_metadata_only_move_updates_meta_identity_without_blob_read(
 
     def tracking_read_bytes(path: Path) -> bytes:
         path_obj = Path(path)
-        if ".dataref" in path_obj.parts and "blobs" in path_obj.parts:
+        if ".reflake" in path_obj.parts and "blobs" in path_obj.parts:
             touched_blob_reads.append(path_obj)
         return original_read_bytes(path_obj)
 
@@ -141,7 +141,7 @@ def test_metadata_only_move_updates_meta_identity_without_blob_read(
 
 def test_memory_safe_manifesting_100k_entries(tmp_path: Path) -> None:
     entry_count = 100_000
-    manifest_path = tmp_path / ".dataref" / "manifests" / "large.jsonl"
+    manifest_path = tmp_path / ".reflake" / "manifests" / "large.jsonl"
 
     def entries():
         for i in range(entry_count):
@@ -248,7 +248,7 @@ def test_local_client_state_writes_use_atomic_replace(
     )
     assert state.head_path in replaced_targets
     assert state.stage_path("feature") in replaced_targets
-    assert not list(state.dataref_dir.rglob("*.tmp"))
+    assert not list(state.reflake_dir.rglob("*.tmp"))
 
 
 def test_uri_routing_reads_expected_blob_bytes(tmp_path: Path) -> None:
@@ -256,18 +256,18 @@ def test_uri_routing_reads_expected_blob_bytes(tmp_path: Path) -> None:
     dataset_root.mkdir(parents=True)
     (dataset_root / "test.csv").write_text("col\n123\n")
 
-    repo = DatarefRepository(dataset_root)
+    repo = ReflakeRepository(dataset_root)
     repo.commit("add file")
 
-    fs = DatarefFileSystem(dataset_roots={"my_data": dataset_root})
-    with fs.open("dataref://my_data@main/test.csv", "rb") as handle:
+    fs = ReflakeFileSystem(dataset_roots={"my_data": dataset_root})
+    with fs.open("reflake://my_data@main/test.csv", "rb") as handle:
         assert handle.read() == b"col\n123\n"
 
 
 def test_exact_lookup_does_not_full_walk(tmp_path: Path) -> None:
     """Exact lookups descend the tree path chain — never a full walk."""
     (tmp_path / "a.txt").write_text("alpha")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     repo.commit("initial")
 
     original_iter_all_entries = repo.store.iter_all_entries
@@ -290,10 +290,10 @@ def test_uri_routing_uses_manifest_sidecar_for_point_reads(tmp_path: Path) -> No
     dataset_root.mkdir(parents=True)
     (dataset_root / "test.csv").write_text("value\n7\n")
 
-    repo = DatarefRepository(dataset_root)
+    repo = ReflakeRepository(dataset_root)
     repo.commit("add file")
 
-    fs = DatarefFileSystem(dataset_roots={"sidecar_data": dataset_root})
+    fs = ReflakeFileSystem(dataset_roots={"sidecar_data": dataset_root})
     cached_repo = fs._repository(dataset_root)
     original_iter_all_entries = cached_repo.store.iter_all_entries
 
@@ -302,7 +302,7 @@ def test_uri_routing_uses_manifest_sidecar_for_point_reads(tmp_path: Path) -> No
 
     cached_repo.store.iter_all_entries = fail_iter_all_entries  # type: ignore[method-assign]
     try:
-        with fs.open("dataref://sidecar_data@main/test.csv", "rb") as handle:
+        with fs.open("reflake://sidecar_data@main/test.csv", "rb") as handle:
             assert handle.read() == b"value\n7\n"
     finally:
         cached_repo.store.iter_all_entries = original_iter_all_entries  # type: ignore[method-assign]
@@ -316,10 +316,10 @@ def test_uri_listing_uses_manifest_sidecar_for_prefix_reads(tmp_path: Path) -> N
     (dataset_root / "logs" / "b.txt").write_text("b")
     (dataset_root / "other.txt").write_text("c")
 
-    repo = DatarefRepository(dataset_root)
+    repo = ReflakeRepository(dataset_root)
     repo.commit("add files")
 
-    fs = DatarefFileSystem(dataset_roots={"listing_data": dataset_root})
+    fs = ReflakeFileSystem(dataset_roots={"listing_data": dataset_root})
     cached_repo = fs._repository(dataset_root)
     original_iter_all_entries = cached_repo.store.iter_all_entries
 
@@ -328,19 +328,19 @@ def test_uri_listing_uses_manifest_sidecar_for_prefix_reads(tmp_path: Path) -> N
 
     cached_repo.store.iter_all_entries = fail_iter_all_entries  # type: ignore[method-assign]
     try:
-        paths = fs.ls("dataref://listing_data@main/logs", detail=False)
+        paths = fs.ls("reflake://listing_data@main/logs", detail=False)
     finally:
         cached_repo.store.iter_all_entries = original_iter_all_entries  # type: ignore[method-assign]
 
     assert paths == [
-        "dataref://listing_data@main/logs/a.txt",
-        "dataref://listing_data@main/logs/b.txt",
+        "reflake://listing_data@main/logs/a.txt",
+        "reflake://listing_data@main/logs/b.txt",
     ]
 
 
 def test_repeated_exact_lookup_reuses_cached_commit(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("alpha")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     repo.commit("initial")
 
     first = repo.resolve_entry("main", "a.txt")
@@ -476,10 +476,10 @@ def test_s3_write_blob_stream_uses_transfer_backend(fake_s3_installer) -> None:
 
 
 def test_commit_cache_is_bounded(tmp_path: Path) -> None:
-    from dataref.core.services.refs import _BoundedCache
+    from reflake.core.services.refs import _BoundedCache
 
     (tmp_path / "a.txt").write_text("a")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     repo.refs._commit_cache = _BoundedCache(maxsize=4)
     for i in range(10):
         (tmp_path / "a.txt").write_text(str(i))
@@ -581,7 +581,7 @@ def test_disposable_analytical_index(tmp_path: Path) -> None:
     (tmp_path / "a.jpg").write_bytes(b"x" * 10)
     (tmp_path / "b.txt").write_text("hello")
 
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     commit_id = repo.commit("indexable commit")
 
     paths = build_analytical_index(tmp_path, "main", export_parquet=True)
@@ -598,7 +598,7 @@ def test_disposable_analytical_index(tmp_path: Path) -> None:
     assert not paths.database_path.exists()
 
     commit = repo.read_commit(commit_id)
-    tree_path = tmp_path / ".dataref" / "trees" / commit.tree
+    tree_path = tmp_path / ".reflake" / "trees" / commit.tree
     assert tree_path.exists()
 
 
@@ -607,13 +607,13 @@ def test_uri_routing_supports_metadata_identity_entries(tmp_path: Path) -> None:
     dataset_root.mkdir(parents=True)
     (dataset_root / "test.csv").write_text("value\n42\n")
 
-    repo = DatarefRepository(dataset_root)
+    repo = ReflakeRepository(dataset_root)
     repo.commit("meta only")
 
-    assert any((dataset_root / ".dataref" / "blobs").rglob("*"))
+    assert any((dataset_root / ".reflake" / "blobs").rglob("*"))
 
-    fs = DatarefFileSystem(dataset_roots={"meta_data": dataset_root})
-    with fs.open("dataref://meta_data@main/test.csv", "rb") as handle:
+    fs = ReflakeFileSystem(dataset_roots={"meta_data": dataset_root})
+    with fs.open("reflake://meta_data@main/test.csv", "rb") as handle:
         assert handle.read() == b"value\n42\n"
 
 
@@ -624,23 +624,23 @@ def test_repository_mutations_can_use_separate_local_store(tmp_path: Path) -> No
     store_root.mkdir(parents=True)
     (dataset_root / "sample.txt").write_text("payload")
 
-    repo = DatarefRepository(
+    repo = ReflakeRepository(
         dataset_root,
         store=LocalObjectStore(store_root),
     )
     commit_id = repo.commit("initial")
 
     assert commit_id
-    assert list((dataset_root / ".dataref" / "commits").glob("*.json")) == []
-    assert list((dataset_root / ".dataref" / "manifests").glob("*.jsonl")) == []
-    assert not any((dataset_root / ".dataref" / "blobs").rglob("*"))
+    assert list((dataset_root / ".reflake" / "commits").glob("*.json")) == []
+    assert list((dataset_root / ".reflake" / "manifests").glob("*.jsonl")) == []
+    assert not any((dataset_root / ".reflake" / "blobs").rglob("*"))
 
-    assert list((store_root / ".dataref" / "commits").glob("*.json"))
-    tree_paths = list((store_root / ".dataref" / "trees").glob("*"))
+    assert list((store_root / ".reflake" / "commits").glob("*.json"))
+    tree_paths = list((store_root / ".reflake" / "trees").glob("*"))
     assert tree_paths
-    assert any((store_root / ".dataref" / "blobs").rglob("*"))
+    assert any((store_root / ".reflake" / "blobs").rglob("*"))
     assert (
-        store_root / ".dataref" / "refs" / "heads" / "main"
+        store_root / ".reflake" / "refs" / "heads" / "main"
     ).read_text().strip() == commit_id
 
     tree_entries = parse_tree_object(tree_paths[0].read_bytes())
@@ -658,12 +658,12 @@ def test_current_branch_preference_is_local_per_client(tmp_path: Path) -> None:
     client_b_root.mkdir(parents=True)
     (dataset_root / "shared.txt").write_text("base")
 
-    repo_a = DatarefRepository(
+    repo_a = ReflakeRepository(
         dataset_root,
         store=LocalObjectStore(store_root),
         client_state=LocalClientState(client_a_root),
     )
-    repo_b = DatarefRepository(
+    repo_b = ReflakeRepository(
         dataset_root,
         store=LocalObjectStore(store_root),
         client_state=LocalClientState(client_b_root),
@@ -677,12 +677,12 @@ def test_current_branch_preference_is_local_per_client(tmp_path: Path) -> None:
     assert repo_a.current_branch() == "feature"
     assert repo_b.current_branch() == "main"
     assert (
-        client_a_root / ".dataref" / "refs" / "HEAD"
+        client_a_root / ".reflake" / "refs" / "HEAD"
     ).read_text().strip() == "refs/heads/feature"
     assert (
-        client_b_root / ".dataref" / "refs" / "HEAD"
+        client_b_root / ".reflake" / "refs" / "HEAD"
     ).read_text().strip() == "refs/heads/main"
-    assert not (store_root / ".dataref" / "refs" / "HEAD").exists()
+    assert not (store_root / ".reflake" / "refs" / "HEAD").exists()
 
 
 def test_staging_state_is_local_per_client(tmp_path: Path) -> None:
@@ -697,12 +697,12 @@ def test_staging_state_is_local_per_client(tmp_path: Path) -> None:
     (dataset_root / "shared.txt").write_text("base")
     (dataset_root / "feature.txt").write_text("feature")
 
-    repo_a = DatarefRepository(
+    repo_a = ReflakeRepository(
         dataset_root,
         store=LocalObjectStore(store_root),
         client_state=LocalClientState(client_a_root),
     )
-    repo_b = DatarefRepository(
+    repo_b = ReflakeRepository(
         dataset_root,
         store=LocalObjectStore(store_root),
         client_state=LocalClientState(client_b_root),
@@ -717,9 +717,9 @@ def test_staging_state_is_local_per_client(tmp_path: Path) -> None:
 
     assert repo_a.status().added == ["feature.txt"]
     assert repo_b.status().added == []
-    assert (client_a_root / ".dataref" / "staging" / "feature.json").exists()
-    assert not (client_b_root / ".dataref" / "staging" / "feature.json").exists()
-    assert not (store_root / ".dataref" / "staging" / "feature.json").exists()
+    assert (client_a_root / ".reflake" / "staging" / "feature.json").exists()
+    assert not (client_b_root / ".reflake" / "staging" / "feature.json").exists()
+    assert not (store_root / ".reflake" / "staging" / "feature.json").exists()
 
 
 def test_commit_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
@@ -730,7 +730,7 @@ def test_commit_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
     )
     (tmp_path / "data.txt").write_text("alpha")
 
-    repo = DatarefRepository(tmp_path, store=store)
+    repo = ReflakeRepository(tmp_path, store=store)
     base_commit = repo.commit("base")
 
     (tmp_path / "data.txt").write_text("beta")
@@ -758,7 +758,7 @@ def test_merge_fails_clearly_on_branch_update_conflict(tmp_path: Path) -> None:
     )
     (tmp_path / "shared.txt").write_text("base")
 
-    repo = DatarefRepository(tmp_path, store=store)
+    repo = ReflakeRepository(tmp_path, store=store)
     base_commit = repo.commit("base")
     repo.branch("feature")
 
@@ -821,7 +821,7 @@ def test_commit_meta_no_redundant_path_stat(tmp_path: Path, monkeypatch) -> None
 
     monkeypatch.setattr(Path, "stat", tracking_path_stat)
 
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     commit_id = repo.commit("meta only")
 
     assert len(commit_id) == 64
@@ -843,7 +843,7 @@ def test_streaming_diff_does_not_build_full_entry_dict(
     for i in range(file_count):
         (tmp_path / f"file_{i:04d}.txt").write_text(f"original_content_{i}")
 
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     commit_a = repo.commit("meta only")
 
     for i in range(file_count // 2):
@@ -882,7 +882,7 @@ def test_commit_10k_files_meta_mode_performance(tmp_path: Path) -> None:
     gen_time = time.perf_counter() - gen_start
     print(f"  Generate: {gen_time:.2f}s ({file_count / gen_time:.0f} files/sec)")
 
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     commit_start = time.perf_counter()
     commit_id = repo.commit("meta only")
     commit_time = time.perf_counter() - commit_start
@@ -902,7 +902,7 @@ def test_streaming_diff_20k_files_performance(tmp_path: Path) -> None:
 
     for i in range(file_count):
         (tmp_path / f"file_{i:05d}.txt").write_text(f"v1_{i}")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     commit_a = repo.commit("modified")
 
     for i in range(file_count):
@@ -963,7 +963,7 @@ def test_fake_s3_scale_100k_files_meta_mode(tmp_path: Path, fake_s3_installer) -
 
     print("\n[FAKE S3 SCALE] Committing 100K files to fake S3...")
     repo = open_repository(
-        "s3://demo-bucket/dataref",
+        "s3://demo-bucket/reflake",
         worktree=worktree,
         client_root=client_root,
     )
@@ -1010,7 +1010,7 @@ def test_fake_s3_scale_100k_files_meta_mode(tmp_path: Path, fake_s3_installer) -
 
 def test_three_way_merge_combines_disjoint_changes(tmp_path: Path) -> None:
     (tmp_path / "shared.txt").write_text("base")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     base = repo.commit("base")
     repo.branch("feature")
     repo.set_current_branch("feature")
@@ -1037,7 +1037,7 @@ def test_three_way_merge_takes_theirs_when_only_one_side_changed(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "file.txt").write_text("base")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     repo.commit("base")
     repo.branch("feature")
     repo.set_current_branch("feature")
@@ -1053,10 +1053,10 @@ def test_three_way_merge_takes_theirs_when_only_one_side_changed(
 
 
 def test_three_way_merge_raises_on_conflict(tmp_path: Path) -> None:
-    from dataref.core.domain import MergeConflictError
+    from reflake.core.domain import MergeConflictError
 
     (tmp_path / "shared.txt").write_text("base")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     repo.commit("base")
     repo.branch("feature")
     repo.set_current_branch("feature")
@@ -1072,7 +1072,7 @@ def test_three_way_merge_raises_on_conflict(tmp_path: Path) -> None:
 
 def test_reflog_records_ref_updates(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("one")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     first = repo.commit("first")
     (tmp_path / "a.txt").write_text("two")
     second = repo.commit("second")
@@ -1087,7 +1087,7 @@ def test_reflog_records_ref_updates(tmp_path: Path) -> None:
 
 def test_catalog_lists_branches(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("one")
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     commit_id = repo.commit("seed")
     repo.branch("feature")
 

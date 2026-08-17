@@ -8,9 +8,9 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dataref.core import DatarefFileSystem, open_repository
-from dataref import run_cli
-from dataref.core.objects.tree import parse_tree_object
+from reflake.core import ReflakeFileSystem, open_repository
+from reflake import run_cli
+from reflake.core.objects.tree import parse_tree_object
 
 
 def test_cli_supports_command_local_repo_flag_for_s3_repositories(
@@ -46,7 +46,7 @@ def test_cli_supports_command_local_repo_flag_for_s3_repositories(
     assert db_path.exists()
     assert "clients" in db_path.as_posix()
 
-    assert not list((tmp_path / ".dataref" / "commits").glob("*.json"))
+    assert not list((tmp_path / ".reflake" / "commits").glob("*.json"))
     assert f"repos/demo/commits/{commit_b}.json" in client._objects
     assert any(key.startswith("repos/demo/trees/") for key in client._objects)
     assert "repos/demo/refs/heads/main" in client._objects
@@ -116,7 +116,7 @@ def test_cli_metadata_only_rm_and_mv_work_for_s3_repositories(
         ("renamed.txt", "added"),
     ]
 
-    assert not list((tmp_path / ".dataref" / "commits").glob("*.json"))
+    assert not list((tmp_path / ".reflake" / "commits").glob("*.json"))
     assert f"repos/demo/commits/{commit_id}.json" in client._objects
 
 
@@ -213,9 +213,9 @@ def test_cli_commit_with_metadata_identity_mode(tmp_path: Path, capsys) -> None:
     capsys.readouterr()
 
     commit_payload = json.loads(
-        next((tmp_path / ".dataref" / "commits").glob("*.json")).read_text()
+        next((tmp_path / ".reflake" / "commits").glob("*.json")).read_text()
     )
-    tree_path = tmp_path / ".dataref" / "trees" / commit_payload["tree"]
+    tree_path = tmp_path / ".reflake" / "trees" / commit_payload["tree"]
     entries = parse_tree_object(tree_path.read_bytes())
     assert len(entries) == 1
     assert entries[0].kind == "b"
@@ -287,10 +287,10 @@ def test_cli_verify_on_meta_entry_promotes_it(
 
     commit_payload = json.loads(
         (
-            tmp_path / ".dataref" / "commits" / f"{verify_payload['commit_id']}.json"
+            tmp_path / ".reflake" / "commits" / f"{verify_payload['commit_id']}.json"
         ).read_text()
     )
-    tree_path = tmp_path / ".dataref" / "trees" / commit_payload["tree"]
+    tree_path = tmp_path / ".reflake" / "trees" / commit_payload["tree"]
     latest_entries = parse_tree_object(tree_path.read_bytes())
     assert latest_entries[0].kind == "b"
 
@@ -328,16 +328,16 @@ def test_cli_staging_commit_is_branch_scoped(tmp_path: Path, capsys) -> None:
     add_payload = json.loads(capsys.readouterr().out)
     assert add_payload["added"] == ["feature.txt"]
 
-    fs = DatarefFileSystem(dataset_roots={"demo": tmp_path})
-    staged_root_listing = fs.ls("dataref://demo@feature+staged/", detail=False)
-    assert "dataref://demo@feature/shared.txt" in staged_root_listing
-    assert "dataref://demo@feature/feature.txt" in staged_root_listing
+    fs = ReflakeFileSystem(dataset_roots={"demo": tmp_path})
+    staged_root_listing = fs.ls("reflake://demo@feature+staged/", detail=False)
+    assert "reflake://demo@feature/shared.txt" in staged_root_listing
+    assert "reflake://demo@feature/feature.txt" in staged_root_listing
 
-    staged_wildcard_listing = fs.ls("dataref://demo@feature+staged/*", detail=False)
-    assert "dataref://demo@feature/shared.txt" in staged_wildcard_listing
-    assert "dataref://demo@feature/feature.txt" in staged_wildcard_listing
+    staged_wildcard_listing = fs.ls("reflake://demo@feature+staged/*", detail=False)
+    assert "reflake://demo@feature/shared.txt" in staged_wildcard_listing
+    assert "reflake://demo@feature/feature.txt" in staged_wildcard_listing
 
-    with fs.open("dataref://demo@feature+staged/feature.txt", "rb") as handle:
+    with fs.open("reflake://demo@feature+staged/feature.txt", "rb") as handle:
         assert handle.read() == b"feature"
 
     assert (
@@ -450,8 +450,8 @@ def test_cli_add_supports_s3_source_with_staged_read_and_logical_destination(
     add_payload = json.loads(capsys.readouterr().out)
     assert add_payload["added"] == ["imports/source.txt"]
 
-    fs = DatarefFileSystem(dataset_roots={"demo": repo_root})
-    with fs.open("dataref://demo@main+staged/imports/source.txt", "rb") as handle:
+    fs = ReflakeFileSystem(dataset_roots={"demo": repo_root})
+    with fs.open("reflake://demo@main+staged/imports/source.txt", "rb") as handle:
         assert handle.read() == b"remote payload"
 
     assert (
@@ -565,9 +565,9 @@ def test_cli_add_supports_s3_prefix_with_destination_prefix(
         "imports/batch/nested/b.txt",
     ]
 
-    fs = DatarefFileSystem(dataset_roots={"demo": repo_root})
+    fs = ReflakeFileSystem(dataset_roots={"demo": repo_root})
     with fs.open(
-        "dataref://demo@main+staged/imports/batch/nested/b.txt", "rb"
+        "reflake://demo@main+staged/imports/batch/nested/b.txt", "rb"
     ) as handle:
         assert handle.read() == b"beta"
 
@@ -1050,13 +1050,13 @@ def test_cli_restore_unknown_ref(tmp_path: Path, capsys) -> None:
 
 
 def test_blob_stream_read_via_filesystem(tmp_path: Path) -> None:
-    from dataref.core.vfs import _BlobReadFile
+    from reflake.core.vfs import _BlobReadFile
 
     (tmp_path / "data.bin").write_bytes(b"streaming test content")
     assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
 
-    fs = DatarefFileSystem(dataset_roots={"ds": tmp_path})
-    handle = fs._open(f"dataref://ds@main/data.bin", "rb")
+    fs = ReflakeFileSystem(dataset_roots={"ds": tmp_path})
+    handle = fs._open(f"reflake://ds@main/data.bin", "rb")
     assert isinstance(handle, _BlobReadFile)
     assert handle.readable()
     assert handle.read() == b"streaming test content"
@@ -1068,8 +1068,8 @@ def test_blob_stream_chunked_read(tmp_path: Path) -> None:
     (tmp_path / "chunked.bin").write_bytes(content)
     assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
 
-    fs = DatarefFileSystem(dataset_roots={"ds": tmp_path})
-    with fs.open("dataref://ds@main/chunked.bin", "rb") as handle:
+    fs = ReflakeFileSystem(dataset_roots={"ds": tmp_path})
+    with fs.open("reflake://ds@main/chunked.bin", "rb") as handle:
         first = handle.read(7)
         assert first == b"chunked"
         rest = handle.read()
@@ -1081,8 +1081,8 @@ def test_blob_stream_seek_and_read(tmp_path: Path) -> None:
     (tmp_path / "seekable.bin").write_bytes(content)
     assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
 
-    fs = DatarefFileSystem(dataset_roots={"ds": tmp_path})
-    with fs.open("dataref://ds@main/seekable.bin", "rb") as handle:
+    fs = ReflakeFileSystem(dataset_roots={"ds": tmp_path})
+    with fs.open("reflake://ds@main/seekable.bin", "rb") as handle:
         assert handle.seekable()
         handle.seek(5)
         assert handle.read(3) == b"567"
@@ -1097,7 +1097,7 @@ def test_blob_stream_large_file_via_filesystem(tmp_path: Path) -> None:
     (tmp_path / "large.bin").write_bytes(data)
     assert run_cli(["commit", "--repo", str(tmp_path), "-m", "large"]) == 0
 
-    fs = DatarefFileSystem(dataset_roots={"ds": tmp_path})
+    fs = ReflakeFileSystem(dataset_roots={"ds": tmp_path})
     position = [0]
 
     class TrackingReadFile:
@@ -1123,13 +1123,13 @@ def test_blob_stream_large_file_via_filesystem(tmp_path: Path) -> None:
 
 
 def test_blob_stream_returns_type_from_open_blob_stream(tmp_path: Path) -> None:
-    from dataref.core.vfs import _BlobReadFile
+    from reflake.core.vfs import _BlobReadFile
 
     (tmp_path / "f.txt").write_text("hello")
     assert run_cli(["commit", "--repo", str(tmp_path), "-m", "init"]) == 0
 
-    fs = DatarefFileSystem(dataset_roots={"ds": tmp_path})
-    handle = fs._open("dataref://ds@main/f.txt", "rb")
+    fs = ReflakeFileSystem(dataset_roots={"ds": tmp_path})
+    handle = fs._open("reflake://ds@main/f.txt", "rb")
     assert type(handle).__name__ == "_BlobReadFile"
     assert not isinstance(handle, io.BytesIO)
     handle.close()

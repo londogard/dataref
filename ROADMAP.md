@@ -1,8 +1,8 @@
-# Dataref Roadmap
+# Reflake Roadmap
 
 ## Product Direction
 
-Dataref should remain client-driven while supporting a shared repository stored in object storage.
+Reflake should remain client-driven while supporting a shared repository stored in object storage.
 
 Target operating modes:
 
@@ -40,7 +40,7 @@ To reduce complexity, `meta` should primarily be used for import/bootstrap flows
 
 ## Architectural Goal
 
-Move Dataref from a local-working-tree-first design to a manifest-first repository design.
+Move Reflake from a local-working-tree-first design to a manifest-first repository design.
 
 For large datasets, operations such as these must not require downloading or rewriting the full dataset:
 
@@ -85,7 +85,7 @@ Deliverables:
 Acceptance criteria:
 
 - Existing local tests still pass.
-- Repository mutations no longer depend on direct local `.dataref` path writes.
+- Repository mutations no longer depend on direct local `.reflake` path writes.
 
 ## Phase 2: Local Client State
 
@@ -150,8 +150,8 @@ Introduce a repository argument that can be either:
 Examples:
 
 ```bash
-uv run dataref --repo /tmp/demo commit -m "local commit"
-uv run dataref --repo s3://my-bucket/datasets/demo branch feature
+uv run reflake --repo /tmp/demo commit -m "local commit"
+uv run reflake --repo s3://my-bucket/datasets/demo branch feature
 ```
 
 Deliverables:
@@ -247,7 +247,7 @@ Goal: improve URI and path handling without weakening backend correctness.
 
 Reason:
 
-- Dataref still needs explicit backend semantics for optimistic locking, conditional writes, etags, and streaming control.
+- Reflake still needs explicit backend semantics for optimistic locking, conditional writes, etags, and streaming control.
 
 Recommendation:
 

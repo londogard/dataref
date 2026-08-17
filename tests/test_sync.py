@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from dataref import run_cli
-from dataref.core import (
+from reflake import run_cli
+from reflake.core import (
     NonFastForwardError,
     RefConflictError,
     open_repository,
 )
-from dataref.core.repository_sync import (
+from reflake.core.repository_sync import (
     push,
     pull,
     fetch,
@@ -584,13 +584,13 @@ def test_push_cas_race_via_stale_snapshot(
 
     # The pre-check from _verify_push_fast_forward reads the remote head
     # fresh from the store and confirms it is an ancestor of b_commit.
-    from dataref.core.repository import open_repository as _open
+    from reflake.core.repository import open_repository as _open
 
     remote_repo = _open(remote, worktree=repo_b_root)
     remote_state = remote_repo.store.read_branch_ref("main")
     assert remote_state is not None
     # Sanity: remote head *is* ancestor of b_commit at this point.
-    from dataref.core.repository_sync import _is_ancestor_in
+    from reflake.core.repository_sync import _is_ancestor_in
 
     assert _is_ancestor_in(remote_state.commit_id, b_commit, repo_b)
 
@@ -662,7 +662,7 @@ def test_pull_cas_race_via_stale_snapshot(
     push(repo_a, remote)
 
     # Fetch a_c3's objects into B's store so ancestry check can read them.
-    from dataref.core.repository_sync import fetch as _fetch
+    from reflake.core.repository_sync import fetch as _fetch
 
     _fetch(repo_b, remote)
 
@@ -782,7 +782,7 @@ def test_push_recovery_after_divergent_pull_and_fetch(
     assert b_head is not None
 
     # B can still fetch the new objects without updating the branch ref.
-    from dataref.core.repository_sync import fetch
+    from reflake.core.repository_sync import fetch
 
     fetch_result = fetch(b_repo, remote)
     assert fetch_result.fetched_commits >= 0
@@ -816,7 +816,7 @@ def test_push_transfers_footer_objects(
     """Parquet footer stats objects travel with push (plan covers footers)."""
     import duckdb
 
-    from dataref.core.config import LocalConfig
+    from reflake.core.config import LocalConfig
 
     client = fake_s3_installer({})
     (tmp_path / "data.parquet").write_bytes(b"")

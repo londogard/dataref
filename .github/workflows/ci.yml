@@ -34,7 +34,7 @@ jobs:
               run: uv run pytest tests -m "not integration"
 
             - name: Smoke-test CLI help
-              run: uv run dataref --help
+              run: uv run reflake --help
 
             - name: Build package
               run: uv build
@@ -98,14 +98,14 @@ jobs:
                   WHEEL=$(ls dist/*.whl | head -1)
                   python -m venv /tmp/smoke-venv
                   /tmp/smoke-venv/bin/pip install "$WHEEL"
-                  echo "=== dataref --help ==="
-                  /tmp/smoke-venv/bin/dataref --help
-                  echo "=== dataref --version ==="
-                  /tmp/smoke-venv/bin/dataref --version 2>/dev/null || true
+                  echo "=== reflake --help ==="
+                  /tmp/smoke-venv/bin/reflake --help
+                  echo "=== reflake --version ==="
+                  /tmp/smoke-venv/bin/reflake --version 2>/dev/null || true
                   echo "=== basic commit smoke ==="
                   TMPDIR=$(mktemp -d)
                   echo "smoke-test-content" > "$TMPDIR/smoke.txt"
-                  /tmp/smoke-venv/bin/dataref commit --repo "$TMPDIR" -m "smoke" > /dev/null
+                  /tmp/smoke-venv/bin/reflake commit --repo "$TMPDIR" -m "smoke" > /dev/null
                   echo "Isolated install smoke test passed."
 
     release-gate:
@@ -137,10 +137,10 @@ jobs:
                     echo "Tag ${GITHUB_REF_NAME} does not match pyproject version ${PACKAGE_VERSION}" >&2
                     exit 1
                   fi
-                  echo "Releasing dataref ${PACKAGE_VERSION}"
+                  echo "Releasing reflake ${PACKAGE_VERSION}"
 
             - name: Build package
               run: uv build
 
             - name: Publish to PyPI
-              run: uv publish --publish-url https://upload.pypi.org/legacy/ --check-url https://pypi.org/pypi/dataref/json
+              run: uv publish --publish-url https://upload.pypi.org/legacy/ --check-url https://pypi.org/pypi/reflake/json

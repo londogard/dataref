@@ -6,7 +6,7 @@ adapters (``LocalObjectStore`` / ``S3ObjectStore``), plus the transfer
 backends and source-URI access the services layer needs.
 
 The ``boto3`` name is explicitly imported and re-exposed so that test
-fixtures that monkeypatch ``dataref.core.objects.boto3.client`` continue to
+fixtures that monkeypatch ``reflake.core.objects.boto3.client`` continue to
 work.
 """
 

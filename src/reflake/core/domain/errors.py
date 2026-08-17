@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 
-class DatarefError(ValueError):
-    """Base exception for all Dataref domain errors."""
+class ReflakeError(ValueError):
+    """Base exception for all Reflake domain errors."""
 
 
-class RefConflictError(DatarefError):
+class RefConflictError(ReflakeError):
     """Raised when a reference update conflicts with another client or concurrent operation."""
 
     def __init__(
@@ -27,11 +27,11 @@ class RefConflictError(DatarefError):
         self.current_commit_id = current_commit_id
 
 
-class OptimisticLockError(DatarefError):
+class OptimisticLockError(ReflakeError):
     """Raised when an optimistic lock check fails during CAS operations."""
 
 
-class NonFastForwardError(DatarefError):
+class NonFastForwardError(ReflakeError):
     """Raised when a merge, push, or pull operation is not a fast-forward update."""
 
     def __init__(self, *, branch: str, current_commit: str, target_commit: str) -> None:
@@ -44,7 +44,7 @@ class NonFastForwardError(DatarefError):
         self.target_commit = target_commit
 
 
-class ObjectMissingError(DatarefError):
+class ObjectMissingError(ReflakeError):
     """Raised by storage adapters when a requested object does not exist."""
 
 
@@ -55,11 +55,11 @@ class PreconditionFailedError(OptimisticLockError):
     """
 
 
-class StorageUnavailableError(DatarefError):
+class StorageUnavailableError(ReflakeError):
     """Raised by storage adapters for unrecoverable S3 transport failures."""
 
 
-class MergeConflictError(DatarefError):
+class MergeConflictError(ReflakeError):
     """Raised when a 3-way merge hits paths modified on both sides."""
 
     def __init__(self, *, paths: list[str]) -> None:
@@ -69,11 +69,11 @@ class MergeConflictError(DatarefError):
         super().__init__(f"Merge conflict at: {joined}{suffix}")
 
 
-class NotARepositoryError(DatarefError):
-    """Raised when an operation is executed outside a Dataref repository."""
+class NotARepositoryError(ReflakeError):
+    """Raised when an operation is executed outside a Reflake repository."""
 
     def __init__(self, root: object = ".") -> None:
         self.root = str(root)
         super().__init__(
-            f"not a dataref repository (or any of the parent directories): .dataref"
+            f"not a reflake repository (or any of the parent directories): .reflake"
         )

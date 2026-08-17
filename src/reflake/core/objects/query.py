@@ -1,6 +1,6 @@
 """Tree walkers: exact lookups, prefix listings, and full walks over tree DAGs.
 
-This is the single lookup core of Dataref v2 (§3 of docs/architecture.md):
+This is the single lookup core of Reflake v2 (§3 of docs/architecture.md):
 
 - exact-path lookups descend the path chain, binary-searching each level in a
   (cached or freshly fetched) tree object — 0–1 GETs warm;

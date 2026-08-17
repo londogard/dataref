@@ -8,7 +8,7 @@ from blake3 import blake3
 from .client_state import LocalClientState
 from .config import BaseConfig, LocalConfig, S3Config
 from .hashing import blake3_digest_file
-from .layout import initialize_dataref_layout
+from .layout import initialize_reflake_layout
 from .manifest import ManifestEntry
 from .objects import (
     LocalObjectStore,
@@ -37,7 +37,7 @@ from .domain import (
 )
 
 
-class DatarefRepository:
+class ReflakeRepository:
     def __init__(
         self,
         root: str | Path,
@@ -46,7 +46,7 @@ class DatarefRepository:
         client_state: LocalClientState | None = None,
         blob_transfer: BlobTransferBackend | None = None,
     ) -> None:
-        self.layout = initialize_dataref_layout(root)
+        self.layout = initialize_reflake_layout(root)
         config = BaseConfig.load(root)
         if config is not None:
             config.validate()
@@ -652,14 +652,14 @@ class DatarefRepository:
 
 def _default_remote_client_root(worktree_root: Path, repo_uri: str) -> Path:
     repo_id = blake3(repo_uri.encode("utf-8")).hexdigest()[:16]
-    return worktree_root / ".dataref" / "clients" / repo_id
+    return worktree_root / ".reflake" / "clients" / repo_id
 
 
 def _find_repo_root(start: str | Path, *, must_exist: bool = False) -> Path:
-    """Walk up from start looking for a .dataref directory."""
+    """Walk up from start looking for a .reflake directory."""
     current = Path(start).resolve()
     while True:
-        if (current / ".dataref").is_dir():
+        if (current / ".reflake").is_dir():
             return current
         parent = current.parent
         if parent == current:
@@ -677,7 +677,7 @@ def open_repository(
     s3_client: object | None = None,
     blob_transfer: BlobTransferBackend | str | None = None,
     must_exist: bool = False,
-) -> DatarefRepository:
+) -> ReflakeRepository:
     if isinstance(blob_transfer, str):
         blob_transfer = build_blob_transfer_backend(blob_transfer)
 
@@ -689,13 +689,13 @@ def open_repository(
             if client_root
             else _default_remote_client_root(worktree_root, root)
         )
-        return DatarefRepository(
+        return ReflakeRepository(
             worktree_root,
             store=S3ObjectStore(
                 bucket,
                 prefix,
                 client=s3_client,
-                branch_root=worktree_root / ".dataref" / "refs" / "heads",
+                branch_root=worktree_root / ".reflake" / "refs" / "heads",
                 blob_transfer=blob_transfer,
             ),
             client_state=LocalClientState(resolved_client_root),
@@ -703,12 +703,12 @@ def open_repository(
 
     if root == "." or str(root) == ".":
         cwd = Path(".").resolve()
-        if not (cwd / ".dataref").is_dir():
+        if not (cwd / ".reflake").is_dir():
             root = _find_repo_root(".", must_exist=must_exist)
         else:
             root = str(cwd)
     repo_root = Path(root).resolve()
-    if must_exist and not (repo_root / ".dataref").is_dir():
+    if must_exist and not (repo_root / ".reflake").is_dir():
         raise NotARepositoryError(repo_root)
 
     config = BaseConfig.load(repo_root)
@@ -726,13 +726,13 @@ def open_repository(
             )
         else:
             resolved_client_root = worktree_root
-        return DatarefRepository(
+        return ReflakeRepository(
             worktree_root,
             store=S3ObjectStore(
                 bucket,
                 prefix,
                 client=s3_client,
-                branch_root=worktree_root / ".dataref" / "refs" / "heads",
+                branch_root=worktree_root / ".reflake" / "refs" / "heads",
                 blob_transfer=blob_transfer,
             ),
             client_state=LocalClientState(resolved_client_root),
@@ -740,7 +740,7 @@ def open_repository(
 
     worktree_root = Path(worktree).resolve() if worktree else repo_root
     resolved_client_root = Path(client_root).resolve() if client_root else repo_root
-    return DatarefRepository(
+    return ReflakeRepository(
         worktree_root,
         store=LocalObjectStore(repo_root),
         client_state=LocalClientState(resolved_client_root),
@@ -902,7 +902,7 @@ def generate_transfer_commands(
     include_metadata: bool = False,
 ) -> list[str]:
     repo_root = Path(root).resolve()
-    return DatarefRepository(repo_root).generate_transfer_commands(
+    return ReflakeRepository(repo_root).generate_transfer_commands(
         ref, mode=mode, include_metadata=include_metadata
     )
 

@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from dataref.core import DatarefRepository, RefConflictError, open_repository
+from reflake.core import ReflakeRepository, RefConflictError, open_repository
 
 pytestmark = pytest.mark.integration
 
@@ -17,7 +17,7 @@ def _open_remote_repo(
     worktree: Path,
     client_root: Path,
     s3_client: object,
-) -> DatarefRepository:
+) -> ReflakeRepository:
     return open_repository(
         repo_uri,
         worktree=worktree,
@@ -249,8 +249,8 @@ def test_s3_integration_million_file_scale(
         f"[SCALE TEST] Generated 1M files in {gen_time:.2f}s ({1_000_000/gen_time:.0f} files/sec)"
     )
 
-    # 2. Commit to Dataref (creates manifest + index from local files)
-    print("[SCALE TEST] Committing 1M files to Dataref...")
+    # 2. Commit to Reflake (creates manifest + index from local files)
+    print("[SCALE TEST] Committing 1M files to Reflake...")
     repo = _open_remote_repo(
         s3_repo_root,
         worktree=worktree,
@@ -258,8 +258,8 @@ def test_s3_integration_million_file_scale(
         s3_client=ministack_client,
     )
     # Use metadata identity for performance (no content hashing on 1M empty files)
-    from dataref.core.config import S3Config
-    from dataref.core.objects import parse_s3_uri
+    from reflake.core.config import S3Config
+    from reflake.core.objects import parse_s3_uri
 
     bucket, prefix = parse_s3_uri(s3_repo_root)
     cfg = S3Config(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .errors import (
-    DatarefError,
+    ReflakeError,
     MergeConflictError,
     NonFastForwardError,
     ObjectMissingError,
@@ -35,7 +35,7 @@ __all__ = [
     "CommitObject",
     "DiffEntry",
     "FetchResult",
-    "DatarefError",
+    "ReflakeError",
     "GcResult",
     "MergeConflictError",
     "MergeResult",

@@ -5,7 +5,7 @@ from tempfile import NamedTemporaryFile
 from typing import BinaryIO, Iterator
 
 from ..domain import BranchRefState, OptimisticLockError, RepositoryObjectKind
-from ..layout import blob_relpath, initialize_dataref_layout
+from ..layout import blob_relpath, initialize_reflake_layout
 from ..manifest import ManifestEntry
 from .query import TreeCache, TreeWalker
 from .tree import parse_tree_object
@@ -13,7 +13,7 @@ from .tree import parse_tree_object
 
 class LocalObjectStore:
     def __init__(self, root: str | Path) -> None:
-        self.layout = initialize_dataref_layout(root)
+        self.layout = initialize_reflake_layout(root)
         self.tree_cache = TreeCache()
         self._walker = TreeWalker(
             read_tree=self.read_tree_bytes,

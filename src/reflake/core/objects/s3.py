@@ -179,7 +179,7 @@ class S3ObjectStore:
     def branch_path(self, branch: str) -> Path:
         if self.branch_root is not None:
             return self.branch_root / branch
-        return Path(".dataref") / "refs" / "heads" / branch
+        return Path(".reflake") / "refs" / "heads" / branch
 
     def write_branch_ref(
         self,

@@ -119,7 +119,7 @@ class ManifestEntry:
 
         Metadata-only entries (``identity_mode == "meta"``) are *unverifiable*:
         their identity is derived from path and size, not from content bytes.
-        Use ``dataref verify`` to read the source blob, compute a Blake3 hash,
+        Use ``reflake verify`` to read the source blob, compute a Blake3 hash,
         and promote the entry to ``blake3`` mode.
         """
         return self.identity_mode == "blake3"
@@ -442,7 +442,7 @@ def walk_files(root: str | Path) -> Iterator[FileEntry]:
         except PermissionError:
             return
         for entry in entries:
-            if entry.name == ".dataref":
+            if entry.name == ".reflake":
                 continue
             if entry.is_dir(follow_symlinks=False):
                 yield from iter_dir(Path(entry.path), rel_parts + (entry.name,))

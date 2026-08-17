@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from dataref.core.vfs import DatarefFileSystem, DatarefURI, _validate_uri_component
-from dataref.core.repository_support import (
+from reflake.core.vfs import ReflakeFileSystem, ReflakeURI, _validate_uri_component
+from reflake.core.repository_support import (
     normalize_import_patterns,
     normalize_repository_path,
 )
@@ -118,111 +118,111 @@ class TestNormalizeImportPatterns:
             normalize_import_patterns(["foo//bar"])
 
 
-class TestDatarefURIValidation:
+class TestReflakeURIValidation:
     def test_valid_uri(self) -> None:
-        fs = DatarefFileSystem()
-        uri = fs._parse_uri("dataref://ds@main/path/to/file.txt")
-        assert uri == DatarefURI(dataset="ds", ref="main", logical_path="path/to/file.txt")
+        fs = ReflakeFileSystem()
+        uri = fs._parse_uri("reflake://ds@main/path/to/file.txt")
+        assert uri == ReflakeURI(dataset="ds", ref="main", logical_path="path/to/file.txt")
 
     def test_with_staged_suffix(self) -> None:
-        fs = DatarefFileSystem()
-        uri = fs._parse_uri("dataref://ds@feature+staged/path")
-        assert uri == DatarefURI(dataset="ds", ref="feature", logical_path="path", include_staging=True)
+        fs = ReflakeFileSystem()
+        uri = fs._parse_uri("reflake://ds@feature+staged/path")
+        assert uri == ReflakeURI(dataset="ds", ref="feature", logical_path="path", include_staging=True)
 
     def test_empty_path_allowed(self) -> None:
-        fs = DatarefFileSystem()
-        uri = fs._parse_uri("dataref://ds@main", allow_empty_path=True)
-        assert uri == DatarefURI(dataset="ds", ref="main", logical_path="")
+        fs = ReflakeFileSystem()
+        uri = fs._parse_uri("reflake://ds@main", allow_empty_path=True)
+        assert uri == ReflakeURI(dataset="ds", ref="main", logical_path="")
 
     def test_rejects_empty_uri(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="cannot be empty"):
             fs._parse_uri("")
 
     def test_rejects_missing_at(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="must include a ref"):
-            fs._parse_uri("dataref://ds")
+            fs._parse_uri("reflake://ds")
 
     def test_rejects_empty_dataset(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="dataset cannot be empty"):
-            fs._parse_uri("dataref://@main/path")
+            fs._parse_uri("reflake://@main/path")
 
     def test_rejects_empty_ref(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="ref cannot be empty"):
-            fs._parse_uri("dataref://ds@/path")
+            fs._parse_uri("reflake://ds@/path")
 
     def test_rejects_empty_ref_with_staged(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="ref cannot be empty"):
-            fs._parse_uri("dataref://ds@+staged/path")
+            fs._parse_uri("reflake://ds@+staged/path")
 
     def test_rejects_empty_path(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="must include a logical file path"):
-            fs._parse_uri("dataref://ds@main")
+            fs._parse_uri("reflake://ds@main")
 
     def test_rejects_dataset_with_slash(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="dataset cannot contain path separators"):
-            fs._parse_uri("dataref://ds/sub@main/path")
+            fs._parse_uri("reflake://ds/sub@main/path")
 
     def test_rejects_dataset_double_dot(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="dataset"):
-            fs._parse_uri("dataref://..@main/path")
+            fs._parse_uri("reflake://..@main/path")
 
     def test_rejects_dataset_dot(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="dataset"):
-            fs._parse_uri("dataref://.@main/path")
+            fs._parse_uri("reflake://.@main/path")
 
     def test_ref_with_slash_is_parsed_as_short_ref(self) -> None:
-        fs = DatarefFileSystem()
-        uri = fs._parse_uri("dataref://ds@feat/ure/path")
+        fs = ReflakeFileSystem()
+        uri = fs._parse_uri("reflake://ds@feat/ure/path")
         assert uri.ref == "feat"
         assert uri.logical_path == "ure/path"
 
     def test_rejects_ref_double_dot(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="ref"):
-            fs._parse_uri("dataref://ds@../path")
+            fs._parse_uri("reflake://ds@../path")
 
     def test_rejects_traversal_in_logical_path(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="cannot traverse"):
-            fs._parse_uri("dataref://ds@main/../etc/passwd")
+            fs._parse_uri("reflake://ds@main/../etc/passwd")
 
     def test_rejects_null_byte_in_dataset(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="null bytes"):
-            fs._parse_uri("dataref://ds\x00@main/path")
+            fs._parse_uri("reflake://ds\x00@main/path")
 
     def test_rejects_null_byte_in_ref(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="null bytes"):
-            fs._parse_uri("dataref://ds@ma\x00in/path")
+            fs._parse_uri("reflake://ds@ma\x00in/path")
 
     def test_rejects_control_char_in_dataset(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="control characters"):
-            fs._parse_uri("dataref://ds\n@main/path")
+            fs._parse_uri("reflake://ds\n@main/path")
 
     def test_rejects_empty_components_in_path(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="empty components"):
-            fs._parse_uri("dataref://ds@main/foo//bar")
+            fs._parse_uri("reflake://ds@main/foo//bar")
 
     def test_allow_empty_path_with_slash(self) -> None:
-        fs = DatarefFileSystem()
-        uri = fs._parse_uri("dataref://ds@main/", allow_empty_path=True)
-        assert uri == DatarefURI(dataset="ds", ref="main", logical_path="")
+        fs = ReflakeFileSystem()
+        uri = fs._parse_uri("reflake://ds@main/", allow_empty_path=True)
+        assert uri == ReflakeURI(dataset="ds", ref="main", logical_path="")
 
     def test_strips_logical_path_prefix_slash(self) -> None:
-        fs = DatarefFileSystem()
-        uri = fs._parse_uri("dataref://ds@main//foo/bar")
+        fs = ReflakeFileSystem()
+        uri = fs._parse_uri("reflake://ds@main//foo/bar")
         assert uri.logical_path == "foo/bar"
 
 
@@ -243,56 +243,56 @@ class TestValidateURIComponent:
             _validate_uri_component("bad\r", "test")
 
 
-class TestDatarefFileSystemExistsBadURI:
+class TestReflakeFileSystemExistsBadURI:
     def test_exists_returns_false_on_bad_uri(self) -> None:
-        fs = DatarefFileSystem()
-        assert fs.exists("dataref://ds@main/../etc") is False
+        fs = ReflakeFileSystem()
+        assert fs.exists("reflake://ds@main/../etc") is False
 
     def test_info_raises_on_bad_uri_traversal(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="cannot traverse"):
-            fs.info("dataref://ds@main/../etc")
+            fs.info("reflake://ds@main/../etc")
 
     def test_ls_raises_on_bad_uri_traversal(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="cannot traverse"):
-            fs.ls("dataref://ds@main/../etc")
+            fs.ls("reflake://ds@main/../etc")
 
 
-class TestDatarefFileSystemDatasetRoot:
+class TestReflakeFileSystemDatasetRoot:
     def test_dataset_in_roots_is_accepted(self) -> None:
-        fs = DatarefFileSystem(dataset_roots={"safe": "/tmp"})
+        fs = ReflakeFileSystem(dataset_roots={"safe": "/tmp"})
         root = fs._dataset_root("safe")
         assert root == Path("/tmp").resolve()
 
     def test_unknown_dataset_raises(self) -> None:
-        fs = DatarefFileSystem()
-        with pytest.raises(FileNotFoundError, match="Unknown Dataref dataset"):
+        fs = ReflakeFileSystem()
+        with pytest.raises(FileNotFoundError, match="Unknown Reflake dataset"):
             fs._dataset_root("nonexistent_dataset_name_for_testing")
 
     def test_unregistered_cwd_folder_dataset_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         (tmp_path / "my_local_folder").mkdir()
         monkeypatch.chdir(tmp_path)
-        fs = DatarefFileSystem()
-        with pytest.raises(FileNotFoundError, match="Unknown Dataref dataset"):
+        fs = ReflakeFileSystem()
+        with pytest.raises(FileNotFoundError, match="Unknown Reflake dataset"):
             fs._dataset_root("my_local_folder")
 
     def test_dataset_with_slash_raises(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="path separators"):
             fs._dataset_root("a/b")
 
     def test_dataset_double_dot_raises(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="path separators"):
             fs._dataset_root("..")
 
     def test_dataset_dot_raises(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="path separators"):
             fs._dataset_root(".")
 
     def test_dataset_null_byte_raises(self) -> None:
-        fs = DatarefFileSystem()
+        fs = ReflakeFileSystem()
         with pytest.raises(ValueError, match="null bytes"):
             fs._dataset_root("bad\x00")

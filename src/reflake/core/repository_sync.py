@@ -8,7 +8,7 @@ from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from .repository import DatarefRepository
+    from .repository import ReflakeRepository
 
 
 from .domain import FetchResult, PullResult, PushResult
@@ -25,8 +25,8 @@ class TransferItem:
 
 
 def _build_plan(
-    src_repo: DatarefRepository,
-    dst_repo: DatarefRepository,
+    src_repo: ReflakeRepository,
+    dst_repo: ReflakeRepository,
     commit_ids: list[str],
     *,
     direction: str,
@@ -170,7 +170,7 @@ def execute_transfer_plan(
 
 
 def _collect_commits_to_push(
-    src_repo: DatarefRepository, dst_repo: DatarefRepository, commit_id: str
+    src_repo: ReflakeRepository, dst_repo: ReflakeRepository, commit_id: str
 ) -> list[str]:
     """Walk local commit chain and return commits not on remote, oldest first."""
     commits: list[str] = []
@@ -188,7 +188,7 @@ def _collect_commits_to_push(
 def _is_ancestor_in(
     ancestor: str,
     descendant: str,
-    repo: DatarefRepository,
+    repo: ReflakeRepository,
 ) -> bool:
     """Check whether *ancestor* is an ancestor of *descendant* by walking
     the commit chain stored in *repo*."""
@@ -202,8 +202,8 @@ def _is_ancestor_in(
 
 
 def _verify_push_fast_forward(
-    local_repo: DatarefRepository,
-    remote_repo: DatarefRepository,
+    local_repo: ReflakeRepository,
+    remote_repo: ReflakeRepository,
     branch: str,
     local_commit_id: str,
 ) -> bool:
@@ -232,8 +232,8 @@ def _verify_push_fast_forward(
 
 
 def _verify_pull_fast_forward(
-    local_repo: DatarefRepository,
-    remote_repo: DatarefRepository,
+    local_repo: ReflakeRepository,
+    remote_repo: ReflakeRepository,
     branch: str,
     remote_commit_id: str,
 ) -> bool:
@@ -262,7 +262,7 @@ def _verify_pull_fast_forward(
 
 
 def push(
-    repo: DatarefRepository,
+    repo: ReflakeRepository,
     remote_uri: str,
     ref: str | None = None,
     *,
@@ -276,7 +276,7 @@ def push(
     result in a RefConflictError rather than a silent overwrite.
 
     Args:
-        repo: Local DatarefRepository.
+        repo: Local ReflakeRepository.
         remote_uri: S3 URI of the remote repository (e.g. s3://bucket/prefix).
         ref: Branch to push (default: current branch).
         blob_transfer: Blob transfer backend name (e.g. "boto3", "s5cmd").
@@ -363,7 +363,7 @@ def push(
 
 
 def pull(
-    repo: DatarefRepository,
+    repo: ReflakeRepository,
     remote_uri: str,
     ref: str | None = None,
     *,
@@ -377,7 +377,7 @@ def pull(
     result in a RefConflictError rather than a silent overwrite.
 
     Args:
-        repo: Local DatarefRepository.
+        repo: Local ReflakeRepository.
         remote_uri: S3 URI of the remote repository.
         ref: Branch to pull (default: current branch).
         blob_transfer: Blob transfer backend name (e.g. "boto3", "s5cmd").
@@ -454,7 +454,7 @@ def pull(
 
 
 def fetch(
-    repo: DatarefRepository,
+    repo: ReflakeRepository,
     remote_uri: str,
     ref: str | None = None,
     *,
@@ -464,7 +464,7 @@ def fetch(
     """Fetch objects from a remote S3 repo without updating local branch refs.
 
     Args:
-        repo: Local DatarefRepository.
+        repo: Local ReflakeRepository.
         remote_uri: S3 URI of the remote repository.
         ref: Branch to fetch (default: current branch).
         blob_transfer: Blob transfer backend name (e.g. "boto3", "s5cmd").

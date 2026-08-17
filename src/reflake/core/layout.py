@@ -7,9 +7,9 @@ from .config import LocalConfig
 
 
 @dataclass(frozen=True)
-class DatarefLayout:
+class ReflakeLayout:
     root: Path
-    dataref_dir: Path
+    reflake_dir: Path
     blobs_dir: Path
     commits_dir: Path
     trees_dir: Path
@@ -20,16 +20,16 @@ class DatarefLayout:
     heads_dir: Path
 
     @classmethod
-    def initialize(cls, root: str | Path) -> "DatarefLayout":
+    def initialize(cls, root: str | Path) -> "ReflakeLayout":
         root_path = Path(root).resolve()
-        dataref_dir = root_path / ".dataref"
-        blobs_dir = dataref_dir / "blobs"
-        commits_dir = dataref_dir / "commits"
-        trees_dir = dataref_dir / "trees"
-        footers_dir = dataref_dir / "footers"
-        manifests_dir = dataref_dir / "manifests"
-        staging_dir = dataref_dir / "staging"
-        refs_dir = dataref_dir / "refs"
+        reflake_dir = root_path / ".reflake"
+        blobs_dir = reflake_dir / "blobs"
+        commits_dir = reflake_dir / "commits"
+        trees_dir = reflake_dir / "trees"
+        footers_dir = reflake_dir / "footers"
+        manifests_dir = reflake_dir / "manifests"
+        staging_dir = reflake_dir / "staging"
+        refs_dir = reflake_dir / "refs"
         heads_dir = refs_dir / "heads"
 
         for path in (
@@ -46,7 +46,7 @@ class DatarefLayout:
 
         return cls(
             root=root_path,
-            dataref_dir=dataref_dir,
+            reflake_dir=reflake_dir,
             blobs_dir=blobs_dir,
             commits_dir=commits_dir,
             trees_dir=trees_dir,
@@ -58,9 +58,9 @@ class DatarefLayout:
         )
 
 
-def initialize_dataref_layout(root: str | Path) -> DatarefLayout:
-    layout = DatarefLayout.initialize(root)
-    config_path = layout.dataref_dir / "config.json"
+def initialize_reflake_layout(root: str | Path) -> ReflakeLayout:
+    layout = ReflakeLayout.initialize(root)
+    config_path = layout.reflake_dir / "config.json"
     if not config_path.exists():
         default_config = LocalConfig(dataset_root=str(layout.root))
         default_config.save(layout.root)

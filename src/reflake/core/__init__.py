@@ -1,12 +1,12 @@
 from .client_state import LocalClientState
-from .config import BaseConfig, DatarefConfig, LocalConfig, S3Config, init_config
+from .config import BaseConfig, ReflakeConfig, LocalConfig, S3Config, init_config
 from .domain import (
     AnalyticalIndexPaths,
     BranchRefState,
     CommitObject,
     DiffEntry,
     FetchResult,
-    DatarefError,
+    ReflakeError,
     GcResult,
     MergeConflictError,
     MergeResult,
@@ -26,7 +26,7 @@ from .domain import (
     StageStatus,
     VerifyResult,
 )
-from .vfs import DatarefFileSystem, DatarefURI
+from .vfs import ReflakeFileSystem, ReflakeURI
 from .hashing import DEFAULT_CHUNK_SIZE, blake3_digest_file, blake3_digest_stream
 from .query import (
     Predicate,
@@ -39,7 +39,7 @@ from .query import (
     prune_row_groups,
     query_analytical_index,
 )
-from .layout import DatarefLayout, blob_relpath, initialize_dataref_layout
+from .layout import ReflakeLayout, blob_relpath, initialize_reflake_layout
 from .manifest import (
     FileEntry,
     ManifestEntry,
@@ -65,7 +65,7 @@ from .objects import (
     parse_s3_uri,
 )
 from .repository import (
-    DatarefRepository,
+    ReflakeRepository,
     open_repository,
     add,
     branch,
@@ -98,7 +98,7 @@ from .repository_sync import (
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
     "BaseConfig",
-    "DatarefConfig",
+    "ReflakeConfig",
     "LocalConfig",
     "S3Config",
     "init_config",
@@ -107,9 +107,9 @@ __all__ = [
     "BlobTransferBackend",
     "CommitObject",
     "DiffEntry",
-    "DatarefFileSystem",
-    "DatarefRepository",
-    "DatarefError",
+    "ReflakeFileSystem",
+    "ReflakeRepository",
+    "ReflakeError",
     "MergeConflictError",
     "MergeResult",
     "NonFastForwardError",
@@ -121,8 +121,8 @@ __all__ = [
     "S5CmdBlobTransferBackend",
     "StageChange",
     "StageStatus",
-    "DatarefURI",
-    "DatarefLayout",
+    "ReflakeURI",
+    "ReflakeLayout",
     "FileEntry",
     "BranchRefState",
     "LocalObjectStore",
@@ -158,7 +158,7 @@ __all__ = [
     "diff",
     "gc",
     "import_s3",
-    "initialize_dataref_layout",
+    "initialize_reflake_layout",
     "log",
     "merge",
     "move_staged",

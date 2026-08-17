@@ -1,4 +1,4 @@
-"""Collaborator services for DatarefRepository.
+"""Collaborator services for ReflakeRepository.
 
 These objects own cohesive slices of repository behavior:
 

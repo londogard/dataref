@@ -8,9 +8,9 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from dataref.cli import run_cli
-from dataref.core.config import LocalConfig
-from dataref.core.objects.footer import (
+from reflake.cli import run_cli
+from reflake.core.config import LocalConfig
+from reflake.core.objects.footer import (
     ColumnStats,
     FooterStats,
     RowGroupStats,
@@ -18,13 +18,13 @@ from dataref.core.objects.footer import (
     parse_parquet_footer,
     serialize_footer_stats,
 )
-from dataref.core.query.pruning import (
+from reflake.core.query.pruning import (
     Predicate,
     parse_where_clause,
     plan_pruned_scan,
     prune_row_groups,
 )
-from dataref.core.repository import DatarefRepository
+from reflake.core.repository import ReflakeRepository
 
 
 def _make_stats(row_groups: tuple[RowGroupStats, ...]) -> FooterStats:
@@ -194,7 +194,7 @@ def _write_parquet_groups(path: Path, groups: int) -> None:
 def test_plan_pruned_scan_on_repo(tmp_path: Path) -> None:
     _write_parquet_groups(tmp_path / "data.parquet", groups=5)
     LocalConfig(identity="blake3", parquet_footer=True).save(tmp_path)
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     repo.commit("captured")
 
     commit_id = repo.resolve_ref("main")
@@ -216,7 +216,7 @@ def test_plan_pruned_scan_prefix_filters_files(tmp_path: Path) -> None:
     _write_parquet_groups(tmp_path / "b.parquet", groups=3)
     (tmp_path / "note.txt").write_text("not parquet")
     LocalConfig(identity="blake3", parquet_footer=True).save(tmp_path)
-    repo = DatarefRepository(tmp_path)
+    repo = ReflakeRepository(tmp_path)
     repo.commit("captured")
 
     commit = repo.read_commit(repo.resolve_ref("main"))
@@ -232,7 +232,7 @@ def test_plan_pruned_scan_prefix_filters_files(tmp_path: Path) -> None:
 def test_cli_query_prune(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write_parquet_groups(tmp_path / "data.parquet", groups=3)
     LocalConfig(identity="blake3", parquet_footer=True).save(tmp_path)
-    DatarefRepository(tmp_path).commit("captured")
+    ReflakeRepository(tmp_path).commit("captured")
 
     exit_code = run_cli(
         [
@@ -255,7 +255,7 @@ def test_cli_query_prune(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
 def test_cli_query_prune_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write_parquet_groups(tmp_path / "data.parquet", groups=3)
     LocalConfig(identity="blake3", parquet_footer=True).save(tmp_path)
-    DatarefRepository(tmp_path).commit("captured")
+    ReflakeRepository(tmp_path).commit("captured")
 
     exit_code = run_cli(
         [

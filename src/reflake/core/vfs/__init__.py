@@ -9,21 +9,21 @@ import fsspec
 from fsspec.spec import AbstractFileSystem
 
 from ..manifest import ManifestEntry
-from ..repository import DatarefRepository, open_repository
+from ..repository import ReflakeRepository, open_repository
 from ..repository_support import _validate_no_binary, normalize_repository_path
 from ..objects import open_source_uri
 
 
 @dataclass(frozen=True)
-class DatarefURI:
+class ReflakeURI:
     dataset: str
     ref: str
     logical_path: str
     include_staging: bool = False
 
 
-class DatarefFileSystem(AbstractFileSystem):
-    protocol = "dataref"
+class ReflakeFileSystem(AbstractFileSystem):
+    protocol = "reflake"
 
     def __init__(
         self,
@@ -40,11 +40,11 @@ class DatarefFileSystem(AbstractFileSystem):
             )
             for name, root in (dataset_roots or {}).items()
         }
-        self._repositories: dict[str, DatarefRepository] = {}
+        self._repositories: dict[str, ReflakeRepository] = {}
 
     @classmethod
     def _strip_protocol(cls, path: str) -> str:
-        return path[len("dataref://") :] if path.startswith("dataref://") else path
+        return path[len("reflake://") :] if path.startswith("reflake://") else path
 
     def _open(  # type: ignore[bad-override]
         self,
@@ -55,7 +55,7 @@ class DatarefFileSystem(AbstractFileSystem):
     ) -> IO[bytes]:
         if mode != "rb":
             raise NotImplementedError(
-                "DatarefFileSystem currently supports read-only binary mode"
+                "ReflakeFileSystem currently supports read-only binary mode"
             )
         resolved = self._resolve_entry(path)
         if resolved.entry.blob_hash:
@@ -105,7 +105,7 @@ class DatarefFileSystem(AbstractFileSystem):
         )
         results: list[dict[str, object] | str] = []
         for entry in entries.values():
-            as_uri = f"dataref://{uri.dataset}@{uri.ref}/{entry.path}"
+            as_uri = f"reflake://{uri.dataset}@{uri.ref}/{entry.path}"
             if detail:
                 results.append(
                     {
@@ -135,7 +135,7 @@ class DatarefFileSystem(AbstractFileSystem):
             raise FileNotFoundError(path)
         return ResolvedEntry(uri=uri, root=root, commit_id=commit_id, entry=entry)
 
-    def _repository(self, root: str | Path) -> DatarefRepository:
+    def _repository(self, root: str | Path) -> ReflakeRepository:
         key = str(root)
         repo = self._repositories.get(key)
         if repo is None:
@@ -148,25 +148,25 @@ class DatarefFileSystem(AbstractFileSystem):
             return self.dataset_roots[dataset]
         _validate_uri_component(dataset, "dataset")
         if "/" in dataset or dataset in (".", ".."):
-            raise ValueError("Dataref URI dataset cannot contain path separators")
-        raise FileNotFoundError(f"Unknown Dataref dataset: {dataset}")
+            raise ValueError("Reflake URI dataset cannot contain path separators")
+        raise FileNotFoundError(f"Unknown Reflake dataset: {dataset}")
 
-    def _parse_uri(self, path: str, *, allow_empty_path: bool = False) -> DatarefURI:
+    def _parse_uri(self, path: str, *, allow_empty_path: bool = False) -> ReflakeURI:
         stripped = self._strip_protocol(path)
         if not stripped:
-            raise ValueError("Dataref URI cannot be empty")
+            raise ValueError("Reflake URI cannot be empty")
         if "@" not in stripped:
             raise ValueError(
-                "Dataref URI must include a ref: dataref://<dataset>@<ref>/<path>"
+                "Reflake URI must include a ref: reflake://<dataset>@<ref>/<path>"
             )
         dataset, remainder = stripped.split("@", maxsplit=1)
         _validate_uri_component(dataset, "dataset")
         if not dataset:
-            raise ValueError("Dataref URI dataset cannot be empty")
+            raise ValueError("Reflake URI dataset cannot be empty")
         if "/" in dataset:
-            raise ValueError("Dataref URI dataset cannot contain path separators")
+            raise ValueError("Reflake URI dataset cannot contain path separators")
         if dataset in (".", ".."):
-            raise ValueError("Dataref URI dataset cannot be '.' or '..'")
+            raise ValueError("Reflake URI dataset cannot be '.' or '..'")
         if "/" in remainder:
             ref_raw, logical_path = remainder.split("/", maxsplit=1)
         else:
@@ -178,17 +178,17 @@ class DatarefFileSystem(AbstractFileSystem):
             ref = ref_raw[: -len("+staged")]
         _validate_uri_component(ref, "ref")
         if not ref:
-            raise ValueError("Dataref URI ref cannot be empty")
+            raise ValueError("Reflake URI ref cannot be empty")
         if "/" in ref:
-            raise ValueError("Dataref URI ref cannot contain path separators")
+            raise ValueError("Reflake URI ref cannot contain path separators")
         if ref in (".", ".."):
-            raise ValueError("Dataref URI ref cannot be '.' or '..'")
+            raise ValueError("Reflake URI ref cannot be '.' or '..'")
         logical_path = logical_path.strip("/")
         if logical_path:
             logical_path = normalize_repository_path(logical_path)
         elif not allow_empty_path:
-            raise ValueError("Dataref URI must include a logical file path")
-        return DatarefURI(
+            raise ValueError("Reflake URI must include a logical file path")
+        return ReflakeURI(
             dataset=dataset,
             ref=ref,
             logical_path=logical_path,
@@ -197,12 +197,12 @@ class DatarefFileSystem(AbstractFileSystem):
 
 
 def _validate_uri_component(component: str, name: str) -> None:
-    _validate_no_binary(component, context=f"Dataref URI {name}")
+    _validate_no_binary(component, context=f"Reflake URI {name}")
 
 
 @dataclass(frozen=True)
 class ResolvedEntry:
-    uri: DatarefURI
+    uri: ReflakeURI
     root: str | Path
     commit_id: str
     entry: ManifestEntry
@@ -270,4 +270,4 @@ class _BlobReadFile(io.IOBase):
             super().close()
 
 
-fsspec.register_implementation("dataref", DatarefFileSystem)
+fsspec.register_implementation("reflake", ReflakeFileSystem)

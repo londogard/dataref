@@ -2,11 +2,11 @@
 
 ## Development Setup
 
-Dataref uses `uv` for dependency management and local commands.
+Reflake uses `uv` for dependency management and local commands.
 
 ```bash
 uv sync --group dev
-uv run dataref --help
+uv run reflake --help
 ```
 
 ## Local Validation
@@ -20,25 +20,25 @@ uv run pytest tests
 Run only the real S3 integration tests against Ministack:
 
 ```bash
-export DATAREF_MINISTACK_ENDPOINT=http://127.0.0.1:9000
-export DATAREF_MINISTACK_ACCESS_KEY=ministack
-export DATAREF_MINISTACK_SECRET_KEY=ministack123
-export DATAREF_MINISTACK_REGION=us-east-1
+export REFLAKE_MINISTACK_ENDPOINT=http://127.0.0.1:9000
+export REFLAKE_MINISTACK_ACCESS_KEY=ministack
+export REFLAKE_MINISTACK_SECRET_KEY=ministack123
+export REFLAKE_MINISTACK_REGION=us-east-1
 
 uv run pytest tests/test_s3_integration.py -m integration
 ```
 
-If `DATAREF_MINISTACK_ENDPOINT` is unset or unreachable, the integration tests skip automatically.
+If `REFLAKE_MINISTACK_ENDPOINT` is unset or unreachable, the integration tests skip automatically.
 
 ## Project Expectations
 
-- Dataref is licensed under AGPL-3.0-or-later; preserve the license and notice files in redistributions.
+- Reflake is licensed under AGPL-3.0-or-later; preserve the license and notice files in redistributions.
 - Prefer Python type hints by default.
-- Keep Dataref client-first: no server, daemon, or central database.
+- Keep Reflake client-first: no server, daemon, or central database.
 - Keep canonical blob storage simple and immutable.
 - Metadata-only operations must not read blob payloads.
 - Prefer stream-safe, O(1)-memory patterns when working with manifests and large imports.
-- Use Blake3 for Dataref content and identity hashing.
+- Use Blake3 for Reflake content and identity hashing.
 
 ## Pull Requests
 

@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on Keep a Changelog, and Dataref currently tracks changes before its first public alpha release.
+The format is based on Keep a Changelog, and Reflake currently tracks changes before its first public alpha release.
 
 ## Unreleased
 
@@ -10,7 +10,7 @@ The format is based on Keep a Changelog, and Dataref currently tracks changes be
 
 ### Added
 
-- **Footer-stats pruning engine (rev. 3, docs/architecture.md §4)**: `dataref query
+- **Footer-stats pruning engine (rev. 3, docs/architecture.md §4)**: `reflake query
   prune <ref> <path> --where "col >= x"` selects the parquet row groups that may
   match an AND-composed predicate (`= != < <= > >= IS NULL IS NOT NULL`) using only
   the compact `footers/<hash>` stats objects — no data bytes are read. Exposed as
@@ -28,7 +28,7 @@ The format is based on Keep a Changelog, and Dataref currently tracks changes be
   under `footers/<hash>` and referenced from new `bp`/`mp` tree entries —
   enabling row-group pruning without reading object bytes. Unchanged files are
   backfilled on the next commit; `verify`-style re-scan can backfill later.
-- `dataref cat <ref> <path>` prints a file's bytes from a ref; `list`, `cat`,
+- `reflake cat <ref> <path>` prints a file's bytes from a ref; `list`, `cat`,
   `diff`, `log`, and `query` work on virtual refs (S3 URIs) without a local
   worktree.
 - Streaming S3 import with metadata identity mode and repeatable path filters.
@@ -59,8 +59,8 @@ The format is based on Keep a Changelog, and Dataref currently tracks changes be
   changed side, drop double-removals), and creates a merge commit with two
   parents when histories diverge; conflicting paths raise
   `MergeConflictError` with the offending paths.
-- `dataref reflog` (P3): every successful ref update is recorded per-branch in
-  client state (old → new commit, operation, timestamp); `dataref catalog`
+- `reflake reflog` (P3): every successful ref update is recorded per-branch in
+  client state (old → new commit, operation, timestamp); `reflake catalog`
   lists branches with their heads and messages.
 - **Plan-then-batch sync (P2, §7)**: `push`/`pull`/`fetch` now compute the exact
   missing-object set (commits, trees, footers, blobs) as a transfer plan and
@@ -69,9 +69,9 @@ The format is based on Keep a Changelog, and Dataref currently tracks changes be
   footer stats objects now sync too.
 - **Adapter error translation (P2, §8)**: the S3 adapters raise domain errors
   (`ObjectMissingError`, `PreconditionFailedError`, `StorageUnavailableError`,
-  all `DatarefError` subclasses) instead of raw botocore exceptions; the CLI no
+  all `ReflakeError` subclasses) instead of raw botocore exceptions; the CLI no
   longer special-cases `BotoCoreError`/`ClientError`.
-- `dataref gc` (P2, §11): audit-only by default — computes the reachable set
+- `reflake gc` (P2, §11): audit-only by default — computes the reachable set
   from all refs (commit DAG → trees → blobs/footers) and reports orphans;
   `--prune` deletes them.
 - `filesystem.py` moved to the `core/vfs/` package; `index.py` moved to the
@@ -98,16 +98,16 @@ The format is based on Keep a Changelog, and Dataref currently tracks changes be
 - Commit creation no longer relies on `_last_manifest_index` instance state; the manifest index is threaded explicitly through manifest writing and commit creation.
 - S3 blob writes via streams (`push`/`pull`/`fetch`) now honor the configured blob transfer backend, so `s5cmd` accelerates sync transfers.
 - The in-process commit cache is now bounded (LRU-style) instead of growing without limit.
-- `DatarefRepository` is now a facade over four focused collaborator services (`RefManager`, `SnapshotWriter`, `StagingArea`, `EntryFactory` in `core/services/`); the god-object class was split from ~1650 to ~790 lines and `repository_ops.py` no longer reaches into repository internals.
+- `ReflakeRepository` is now a facade over four focused collaborator services (`RefManager`, `SnapshotWriter`, `StagingArea`, `EntryFactory` in `core/services/`); the god-object class was split from ~1650 to ~790 lines and `repository_ops.py` no longer reaches into repository internals.
 
 ### Removed
 
 - Removed `manifest_index.py`, `manifest_query.py`, `.idx` sidecars, the embedded manifest index, and the index/fallback decision tree.
-- Removed the `dataref import` command; S3 ingress is now staged via `dataref add ... s3://... [--identity meta --as ...]` followed by `dataref commit --staged`.
-- Removed `--identity` from `dataref commit`; the commit identity mode is now configured with `dataref config set identity meta`, or set per stage with `dataref add --identity ...`.
-- Removed the direct-commit `-m/--message` flag from `dataref rm` and `dataref mv`; metadata-only mutations are staged and committed with `dataref commit --staged`.
-- Removed `--ref` from `dataref verify` and `dataref index build`; both now target the current branch.
-- Removed `dataref index query` and `dataref index drop`; `dataref index build` remains and the produced DuckDB database can be queried with the DuckDB CLI.
+- Removed the `reflake import` command; S3 ingress is now staged via `reflake add ... s3://... [--identity meta --as ...]` followed by `reflake commit --staged`.
+- Removed `--identity` from `reflake commit`; the commit identity mode is now configured with `reflake config set identity meta`, or set per stage with `reflake add --identity ...`.
+- Removed the direct-commit `-m/--message` flag from `reflake rm` and `reflake mv`; metadata-only mutations are staged and committed with `reflake commit --staged`.
+- Removed `--ref` from `reflake verify` and `reflake index build`; both now target the current branch.
+- Removed `reflake index query` and `reflake index drop`; `reflake index build` remains and the produced DuckDB database can be queried with the DuckDB CLI.
 
 ### Fixed
 

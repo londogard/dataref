@@ -1,5 +1,5 @@
 [project]
-name = "dataref"
+name = "reflake"
 version = "0.1.0"
 description = "A client-first, object-storage-first data versioning engine"
 readme = "README.md"
@@ -35,14 +35,14 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/londogard/dataref"
-Documentation = "https://github.com/londogard/dataref#readme"
-Issues = "https://github.com/londogard/dataref/issues"
-Changelog = "https://github.com/londogard/dataref/blob/main/CHANGELOG.md"
+Repository = "https://github.com/londogard/reflake"
+Documentation = "https://github.com/londogard/reflake#readme"
+Issues = "https://github.com/londogard/reflake/issues"
+Changelog = "https://github.com/londogard/reflake/blob/main/CHANGELOG.md"
 Funding = "https://github.com/sponsors/londogard"
 
 [project.scripts]
-dataref = "dataref.cli:main"
+reflake = "reflake.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -50,7 +50,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/dataref",
+    "src/reflake",
     "pyproject.toml",
     "README.md",
     "LICENSE",
@@ -62,7 +62,7 @@ include = [
 dev = ["pytest>=9.0.2", "pyrefly>=0.3.0"]
 
 [tool.pyrefly]
-project-includes = ["src/dataref"]
+project-includes = ["src/reflake"]
 project-excludes = ["tests/"]
 
 [tool.pytest.ini_options]
